@@ -20,7 +20,7 @@ from .pipeline.location_filter import LocationFilter
 
 logger = logging.getLogger(__name__)
 
-VOLLNA_RSS_URL = "https://www.vollna.com/rss/oUvGsAGQVnEeRtHuPWxX"
+VOLLNA_RSS_URL = "https://www.vollna.com/rss/XswrDNEvze23uFN217i2"
 
 
 class VollnaScraper:

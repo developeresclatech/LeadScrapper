@@ -6,10 +6,30 @@ import unittest
 from unittest.mock import patch
 from tempfile import TemporaryDirectory
 
-from upwork_scraper.chrome_runtime import chrome_launch_options
+from pathlib import Path
+
+from upwork_scraper.chrome_runtime import (
+    chrome_launch_options,
+    detect_chrome_major,
+)
 
 
 class ChromeRuntimeTests(unittest.TestCase):
+    @patch("upwork_scraper.chrome_runtime.os.name", "nt")
+    @patch("upwork_scraper.chrome_runtime._windows_file_major", return_value=151)
+    def test_active_executable_wins_over_staged_update(
+        self, file_major
+    ) -> None:
+        with TemporaryDirectory() as application_dir:
+            Path(application_dir, "151.0.7922.174").mkdir()
+            Path(application_dir, "152.0.7977.65").mkdir()
+            chrome = Path(application_dir, "chrome.exe")
+            chrome.touch()
+
+            self.assertEqual(detect_chrome_major(str(chrome)), 151)
+
+        file_major.assert_called_once_with(chrome)
+
     @patch("upwork_scraper.chrome_runtime.detect_chrome_major", return_value=150)
     def test_local_browser_pins_driver_download_to_installed_major(
         self, detect_major

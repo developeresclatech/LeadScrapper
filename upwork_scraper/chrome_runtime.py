@@ -7,6 +7,8 @@ import os
 import re
 import subprocess
 import threading
+import ctypes
+from ctypes import wintypes
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -22,13 +24,45 @@ def _major_from_text(value: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _windows_file_major(path: Path) -> int | None:
+    """Read the executable's product version from its Windows resources."""
+    if os.name != "nt":
+        return None
+    try:
+        version = ctypes.windll.version
+        size = version.GetFileVersionInfoSizeW(str(path), None)
+        if not size:
+            return None
+        buffer = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(str(path), 0, size, buffer):
+            return None
+        value = ctypes.c_void_p()
+        value_size = wintypes.UINT()
+        if not version.VerQueryValueW(
+            buffer, "\\", ctypes.byref(value), ctypes.byref(value_size)
+        ):
+            return None
+        # VS_FIXEDFILEINFO starts with two DWORDs, followed by the product
+        # version MS DWORD whose high word is Chrome's major version.
+        fields = ctypes.cast(value, ctypes.POINTER(wintypes.DWORD))
+        return fields[4] >> 16
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
 def detect_chrome_major(browser_path: str) -> int | None:
     """Return the installed browser major without assuming an operating system."""
     path = Path(browser_path)
 
-    # A standard Windows Chrome install keeps chrome.exe beside a directory
-    # named after the full product version. Reading that name avoids starting
-    # Chrome (which may attach to, or contend with, the user's normal profile).
+    # Read chrome.exe itself first. During an update, its directory can contain
+    # both the active version and a newer staged version.
+    if os.name == "nt":
+        executable_major = _windows_file_major(path)
+        if executable_major is not None:
+            return executable_major
+
+    # Keep the directory scan as a fallback for unusual Windows executables
+    # whose version resource cannot be read.
     if os.name == "nt" and path.parent.is_dir():
         versions = [
             version
