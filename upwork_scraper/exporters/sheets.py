@@ -13,6 +13,7 @@ from typing import Callable, TypeVar
 
 from gspread.exceptions import WorksheetNotFound
 from gspread.utils import rowcol_to_a1
+from requests.exceptions import ConnectionError, SSLError, Timeout
 
 from ..config import ScraperConfig
 from ..pipeline.processor import ProcessedLead
@@ -160,7 +161,10 @@ class SheetsBatchWriter:
             ],
         )
         client = gspread.authorize(credentials)
-        self._spreadsheet = client.open_by_key(self.config.google_sheet_id)
+        self._spreadsheet = self._write(
+            "open spreadsheet",
+            lambda: client.open_by_key(self.config.google_sheet_id),
+        )
 
     def _write(self, operation: str, call: Callable[[], _T]) -> _T:
         """Run one Sheets write with throttling and bounded retries."""
@@ -210,6 +214,8 @@ class SheetsBatchWriter:
 
     @staticmethod
     def _is_retryable(exc: Exception) -> bool:
+        if isinstance(exc, (ConnectionError, SSLError, Timeout)):
+            return True
         code = getattr(exc, "code", None)
         if code is None:
             response = getattr(exc, "response", None)

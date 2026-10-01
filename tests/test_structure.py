@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from requests.exceptions import SSLError
+
 from upwork_scraper.analyzer import LeadAnalysis, LeadAnalyzer
 from upwork_scraper.config import ScraperConfig
 from upwork_scraper.exporters.sheets import SheetsBatchWriter
@@ -329,6 +331,13 @@ class StructuralPipelineTests(unittest.TestCase):
                 JobLead(title="Canadian Lead", country="Canada")
             )
         )
+        for region in ("North America", "America"):
+            with self.subTest(region=region):
+                self.assertTrue(
+                    location_filter.matches(
+                        JobLead(title="Regional Lead", country=region)
+                    )
+                )
 
     def test_sheets_upload_triggers_at_five_eligible_leads(self) -> None:
         writer = _SheetsWriterProbe()
@@ -418,6 +427,24 @@ class StructuralPipelineTests(unittest.TestCase):
         self.assertEqual(result, "ok")
         self.assertEqual(attempts[0], 3)
         self.assertEqual(sleeps, [2, 4])
+
+    def test_sheets_write_retries_transient_ssl_errors(self) -> None:
+        writer = _SheetsWriterProbe()
+        writer.config.sheets_retry_attempts = 2
+        writer.config.sheets_retry_base_delay = 1
+        writer.config.sheets_retry_max_delay = 1
+        writer.config.sheets_min_write_interval = 0
+        writer._sleep = lambda _: None
+        attempts = [0]
+
+        def flaky_write() -> str:
+            attempts[0] += 1
+            if attempts[0] == 1:
+                raise SSLError("unexpected EOF")
+            return "ok"
+
+        self.assertEqual(writer._write("test SSL retry", flaky_write), "ok")
+        self.assertEqual(attempts[0], 2)
 
     def test_failed_batch_enters_cooldown_without_losing_buffer(self) -> None:
         writer = _FailingSheetsWriter()

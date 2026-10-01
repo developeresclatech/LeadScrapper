@@ -73,6 +73,8 @@ class LocationFilter:
                 "united states",
                 "united states of america",
                 "canada",
+                "north america",
+                "america",
             }:
                 return True
             if any(pattern.search(value) for pattern in self._target_patterns):

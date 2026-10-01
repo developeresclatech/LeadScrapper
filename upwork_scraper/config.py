@@ -300,7 +300,7 @@ class ScraperConfig:
 
     # Target locations — only keep leads matching these (empty = keep all)
     target_locations: list[str] = field(default_factory=lambda: [
-        "United States", "Canada",
+        "United States", "Canada", "North America", "America",
     ])
 
     # Output

@@ -494,6 +494,11 @@ class UpworkSeleniumScraper:
         locations: list[str] = []
         for target in self.config.target_locations:
             normalized = target.casefold().strip()
+            if normalized in {"north america", "america"}:
+                for country in ("United States", "Canada"):
+                    if country not in locations:
+                        locations.append(country)
+                continue
             if normalized in {
                 "us",
                 "u.s.",

@@ -9,6 +9,17 @@ from upwork_scraper.selenium_scraper import UpworkSeleniumScraper
 
 
 class UpworkPaginationTests(unittest.TestCase):
+    def test_america_aliases_search_united_states_and_canada(self) -> None:
+        for alias in ("North America", "America"):
+            with self.subTest(alias=alias):
+                scraper = UpworkSeleniumScraper(
+                    ScraperConfig(target_locations=[alias])
+                )
+                self.assertEqual(
+                    scraper._client_search_locations(),
+                    ["United States", "Canada"],
+                )
+
     def test_detects_cloudflare_verification_page(self) -> None:
         class _Body:
             text = "Cloudflare Ray ID: abc123"
