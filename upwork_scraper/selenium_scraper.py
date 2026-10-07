@@ -289,38 +289,96 @@ class UpworkSeleniumScraper:
                 )
                 return False
 
-        if "upwork.com/nx/" in driver.current_url:
+        if self._is_logged_in(driver):
             logger.info("Already logged in.")
             return True
 
         logger.info("Opening Upwork login page...")
         driver.get(LOGIN_URL)
         time.sleep(3)
+        if self._is_logged_in(driver):
+            logger.info("Login page redirected to an authenticated session.")
+            return True
 
-        self._input_if_present(driver, [
+        username_entered = self._input_if_present(driver, [
             "input[name='login[username]']",
             "input#login_username",
             "input[type='email']",
-        ], username, submit=True)
+        ], username, submit=True, stop_when_logged_in=True)
+        if self._is_logged_in(driver):
+            return True
+        if not username_entered:
+            logger.error("Upwork username field was not available; login failed.")
+            return False
         time.sleep(2)
 
-        self._input_if_present(driver, [
+        password_entered = self._input_if_present(driver, [
             "input[name='login[password]']",
             "input#login_password",
             "input[type='password']",
-        ], password, submit=True)
+        ], password, submit=True, stop_when_logged_in=True)
+        if self._is_logged_in(driver):
+            return True
+        if not password_entered:
+            logger.error("Upwork password field was not available; login failed.")
+            return False
 
         pause = 90  # seconds for 2FA / manual verification
         logger.info(f"Waiting up to {pause}s for login/2FA...")
         end = time.time() + pause
         while time.time() < end:
-            if "upwork.com/nx/" in driver.current_url:
+            if self._is_logged_in(driver):
                 logger.info("Login successful.")
                 return True
             time.sleep(2)
 
         logger.warning("Login not confirmed within timeout.")
         return False
+
+    @staticmethod
+    def _is_logged_in(driver) -> bool:
+        """Require visible account controls; public search URLs are not proof."""
+        if "/account-security/login" in driver.current_url:
+            return False
+        try:
+            # A visible guest navigation link takes precedence over stale or
+            # hidden account controls during page transitions.
+            guest_selectors = (
+                "header a[href*='/account-security/login']",
+                "nav a[href*='/account-security/login']",
+                "header a[href*='/signup']",
+                "nav a[href*='/signup']",
+            )
+            for selector in guest_selectors:
+                if any(el.is_displayed() for el in driver.find_elements(By.CSS_SELECTOR, selector)):
+                    return False
+            account_selectors = (
+                "[data-test='user-menu']",
+                "[data-test='user-menu-button']",
+                "[data-qa='user-menu']",
+                "[data-test='nav-user-dropdown']",
+                "button[aria-label*='Account']",
+                "button[aria-label*='account']",
+                "a[href*='/ab/account-security/logout']",
+                "nav a[href*='/ab/messages']",
+                "aside a[href*='/ab/messages']",
+                "nav a[href*='/nx/payments']",
+                "aside a[href*='/nx/payments']",
+            )
+            if any(
+                el.is_displayed()
+                for selector in account_selectors
+                for el in driver.find_elements(By.CSS_SELECTOR, selector)
+            ):
+                return True
+            # The signed-in find-work dashboard uses a sidebar rather than
+            # the older account menu. Require personal dashboard content too.
+            if "/nx/find-work/" in driver.current_url:
+                body = driver.find_element(By.TAG_NAME, "body").text.casefold()
+                return "profile visibility" in body and "connects:" in body
+            return False
+        except WebDriverException:
+            return False
 
     @staticmethod
     def _is_verification_page(driver) -> bool:
@@ -336,22 +394,30 @@ class UpworkSeleniumScraper:
         )
 
     @staticmethod
-    def _input_if_present(driver, selectors, value, timeout=8, submit=True):
+    def _input_if_present(driver, selectors, value, timeout=8, submit=True,
+                          stop_when_logged_in=False):
         if not value:
             return False
-        for selector in selectors:
-            try:
-                el = WebDriverWait(driver, timeout).until(
-                    EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
-                )
-                el.clear()
-                el.send_keys(value)
-                if submit:
-                    el.send_keys(Keys.ENTER)
+        def field_or_session(browser):
+            if stop_when_logged_in and UpworkSeleniumScraper._is_logged_in(browser):
                 return True
-            except TimeoutException:
-                continue
-        return False
+            for selector in selectors:
+                for element in browser.find_elements(By.CSS_SELECTOR, selector):
+                    if element.is_displayed():
+                        return element
+            return False
+
+        try:
+            el = WebDriverWait(driver, timeout).until(field_or_session)
+            if el is True:
+                return False  # Caller confirms the newly authenticated session.
+            el.clear()
+            el.send_keys(value)
+            if submit:
+                el.send_keys(Keys.ENTER)
+            return True
+        except TimeoutException:
+            return False
 
     # ==================================================================
     # Scraping
