@@ -86,9 +86,12 @@ class _WorksheetFake:
 
 
 class UploadSheetLayoutTests(unittest.TestCase):
-    def test_standalone_upload_requires_score_of_thirty(self) -> None:
-        self.assertFalse(_is_sheet_eligible({"Lead Score": "29"}))
+    def test_standalone_upload_includes_red_leads(self) -> None:
+        self.assertTrue(_is_sheet_eligible({"Lead Score": "0"}))
+        self.assertTrue(_is_sheet_eligible({"Lead Score": "29"}))
         self.assertTrue(_is_sheet_eligible({"Lead Score": "30"}))
+        self.assertTrue(_is_sheet_eligible({"Lead Score": "49"}))
+        self.assertFalse(_is_sheet_eligible({"Lead Score": "invalid"}))
 
     def test_empty_worksheet_receives_headers(self) -> None:
         worksheet = _WorksheetFake([])

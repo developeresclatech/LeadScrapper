@@ -298,7 +298,7 @@ The main structural settings are in `ScraperConfig`:
 | `max_results_per_keyword` | `50` | Result cap returned by each platform search |
 | `google_sheet_tab` | `Leads` | Single worksheet receiving every platform |
 | `sheets_batch_size` | `5` | Eligible leads per streaming Sheets upload |
-| `sheets_min_lead_score` | `30` | Minimum score saved to Google Sheets |
+| `sheets_min_lead_score` | `0` | Minimum score saved to Google Sheets |
 | `sheets_min_write_interval` | `1.1` | Minimum seconds between Sheets write requests |
 | `sheets_retry_attempts` | `5` | Attempts for quota and temporary API failures |
 | `sheets_quota_cooldown` | `60` | Cooldown after a batch exhausts its retries |
@@ -422,12 +422,12 @@ Priority is based strictly on the final 0–100 score:
 
 | Score | Priority | Google Sheets |
 |---:|---|---|
-| 0–29 | RED | Not uploaded |
+| 0–29 | RED | Uploaded |
 | 30–49 | RED | Uploaded |
 | 50–69 | YELLOW | Uploaded |
 | 70–100 | GREEN | Uploaded |
 
-Scores below 30 remain available in SQLite and local CSV/JSON exports. Unique,
+All scores are eligible for Sheets and remain available in SQLite and local CSV/JSON exports. Unique,
 recency, and location filtering continue to run before this Sheets cutoff.
 
 ## Failure behavior

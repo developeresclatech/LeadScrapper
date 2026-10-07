@@ -31,6 +31,8 @@ class ScraperConfig:
         "IT Solution provider",
         "ui design",
         "Branding",
+        "web design",
+        "website",
         # High-Intent Buyer Keywords (Most Valuable)
         # "hire react native developer",
         # "hire react developer",
@@ -313,7 +315,7 @@ class ScraperConfig:
     google_credentials_path: str = os.getenv("GOOGLE_CREDENTIALS_PATH", "service-account.json")
     google_sheet_tab: str = os.getenv("GOOGLE_SHEET_TAB", "Leads")
     sheets_batch_size: int = 5
-    sheets_min_lead_score: int = 30
+    sheets_min_lead_score: int = 0
     sheets_min_write_interval: float = 1.1
     sheets_retry_attempts: int = 5
     sheets_retry_base_delay: float = 5.0

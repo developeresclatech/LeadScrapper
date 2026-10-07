@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 CREDS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "service-account.json")
 CSV_PATH = "output/leads_20260716_211534.csv"
-MIN_LEAD_SCORE = 30
+MIN_LEAD_SCORE = 0
 
 # Google Sheets does not allow "/" in worksheet titles, so date tabs use the
 # equivalent unambiguous format (for example, "Leads 03-08-2026").
@@ -221,7 +221,7 @@ def main():
         return
 
     rows = []
-    with open(CSV_PATH, newline="", encoding="utf-8") as f:
+    with open(CSV_PATH, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
             rows.append(row)

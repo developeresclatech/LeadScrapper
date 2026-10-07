@@ -88,7 +88,7 @@ class SheetsBatchWriter:
             return
         platform_label = self._platform_label(item)
         minimum_score = getattr(
-            self.config, "sheets_min_lead_score", 30
+            self.config, "sheets_min_lead_score", 0
         )
         if item.analysis.lead_score < minimum_score:
             self._stats[platform_label]["below_score"] += 1
