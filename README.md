@@ -171,6 +171,12 @@ reporting that it is already logged in. A visible browser does not itself
 bypass Upwork's verification; it provides the interactive session needed to
 complete it legitimately.
 
+The same verification timeout applies after password submission for login/2FA
+(at least the login timeout). If login times out, the next keyword waits in
+that worker's browser for the remaining login cooldown (300 seconds by default).
+Completing sign-in during this wait resumes that keyword without submitting
+credentials again. Each browser worker needs its own authenticated session.
+
 The SQLite database uses the Docker-managed `scraper_data` volume because
 SQLite WAL files are unreliable on Docker Desktop's Windows bind mounts.
 Exports remain available directly in the host `output/` directory.

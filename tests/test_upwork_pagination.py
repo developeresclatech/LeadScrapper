@@ -57,6 +57,7 @@ class UpworkPaginationTests(unittest.TestCase):
         )
         calls: list[tuple[list[JobLead], bool]] = []
         scraper._scrape_keyword = lambda _: [lead]
+        scraper.enrich_attachments = lambda leads: None
         scraper.enrich_client_locations = (
             lambda leads, ensure_logged_in=True: calls.append(
                 (leads, ensure_logged_in)

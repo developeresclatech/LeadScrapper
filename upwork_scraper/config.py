@@ -282,15 +282,15 @@ class ScraperConfig:
     # Daily adaptive run policy
     adaptive_daily_limits: bool = True
     force_catch_up: bool = False
-    first_daily_run_results: int = 50
+    first_daily_run_results: int = 150
     first_daily_run_pages: int = 3
     later_daily_run_results: int = 20
     later_daily_run_pages: int = 3
     later_daily_run_recency_hours: float = 2.0
     first_daily_run_recency_hours: float = 14.0
     catch_up_after_hours: float = 14.0
-    catch_up_max_results_per_keyword: int = 1000
-    catch_up_max_pages: int = 100
+    catch_up_max_results_per_keyword: int = 150
+    catch_up_max_pages: int = 3
     keep_unknown_posted_dates: bool = True
     normal_keep_unknown_posted_dates: bool = False
     # Runtime value set by LeadEngine for age-aware platform pagination.
@@ -328,6 +328,8 @@ class ScraperConfig:
     selenium_max_scrolls: int = 8
     selenium_command_timeout: float = 45.0
     upwork_location_timeout: int = 12
+    upwork_login_timeout: int = 45
+    upwork_login_cooldown: int = 300
     upwork_verification_timeout: int = int(
         os.getenv("UPWORK_VERIFICATION_TIMEOUT", "180")
     )

@@ -53,6 +53,8 @@ def processed_lead_to_row(
         "Lead Found At": display_timestamp(found_at, lead.scraped_at),
         "Sheet Saved At": display_timestamp(saved_at),
         "Found-to-Sheet Seconds": duration,
+        "Attachment Status": lead.attachment_status,
+        "Attachment Count": str(lead.attachment_count) if lead.attachment_count is not None else "",
         "Priority": analysis.priority,
         "Lead Score": str(analysis.lead_score),
         "Company Name": analysis.company_name,
@@ -72,4 +74,6 @@ def processed_lead_to_row(
         "Services Required": analysis.services_required,
         "Qualification Reason": analysis.qualification_reason,
         "Full Job Description": (lead.description or "")[:1000],
+        "Attachment Names": "\n".join(lead.attachment_names),
+        "Attachment URLs": "\n".join(lead.attachment_urls),
     }

@@ -23,3 +23,7 @@ class JobLead(BaseModel):
     )
     job_id: str = ""
     keyword_searched: str = ""
+    attachment_status: str = "Not checked"
+    attachment_count: int | None = None
+    attachment_names: list[str] = Field(default_factory=list)
+    attachment_urls: list[str] = Field(default_factory=list)

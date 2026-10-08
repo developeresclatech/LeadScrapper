@@ -126,8 +126,8 @@ class StructuralPipelineTests(unittest.TestCase):
         first = DailyRunPolicy.from_config(config, 1)
         later = DailyRunPolicy.from_config(config, 2, 2.0)
 
-        self.assertEqual(first.max_results_per_keyword, 1000)
-        self.assertEqual(first.page_limit, 100)
+        self.assertEqual(first.max_results_per_keyword, 150)
+        self.assertEqual(first.page_limit, 3)
         self.assertEqual(first.recency_hours, 14.0)
         self.assertTrue(first.is_catch_up)
         self.assertEqual(later.max_results_per_keyword, 20)
@@ -140,8 +140,8 @@ class StructuralPipelineTests(unittest.TestCase):
 
         catch_up = DailyRunPolicy.from_config(config, 7, 15.5)
 
-        self.assertEqual(catch_up.max_results_per_keyword, 1000)
-        self.assertEqual(catch_up.page_limit, 100)
+        self.assertEqual(catch_up.max_results_per_keyword, 150)
+        self.assertEqual(catch_up.page_limit, 3)
         self.assertEqual(catch_up.recency_hours, 14.0)
         self.assertTrue(catch_up.is_catch_up)
 
@@ -152,7 +152,7 @@ class StructuralPipelineTests(unittest.TestCase):
 
         self.assertTrue(catch_up.is_catch_up)
         self.assertEqual(catch_up.recency_hours, 14.0)
-        self.assertEqual(catch_up.page_limit, 100)
+        self.assertEqual(catch_up.page_limit, 3)
 
     def test_daily_run_number_is_persisted_by_local_date(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -386,6 +386,7 @@ class StructuralPipelineTests(unittest.TestCase):
 
     def test_sheets_rejects_scores_below_thirty(self) -> None:
         writer = _SheetsWriterProbe()
+        writer.config.sheets_min_lead_score = 30
         analysis = LeadAnalysis(priority="RED", lead_score=29)
 
         for index in range(5):

@@ -100,6 +100,16 @@ class UploadSheetLayoutTests(unittest.TestCase):
 
         self.assertEqual(values[0], SHEET_HEADERS)
 
+    def test_attachment_headers_extend_existing_sheet_without_extra_row(self) -> None:
+        existing_lead = ["Existing lead", "https://example.com"]
+        old_headers = [h for h in SHEET_HEADERS if not h.startswith("Attachment")]
+        existing_lead += [""] * (len(old_headers) - len(existing_lead))
+        worksheet = _WorksheetFake([old_headers, existing_lead])
+        values = _ensure_headers(worksheet)
+        self.assertEqual(values[0], SHEET_HEADERS)
+        self.assertEqual(values[1], existing_lead[:7] + ["", ""] + existing_lead[7:])
+        self.assertEqual(len(values), 2)
+
     def test_headerless_data_is_preserved_below_inserted_header(self) -> None:
         existing_lead = ["Existing lead", "https://example.com"]
         worksheet = _WorksheetFake([existing_lead])
@@ -121,7 +131,7 @@ class UploadSheetLayoutTests(unittest.TestCase):
             ["", "", ""],
         )
         self.assertEqual(
-            values[1][TIMING_INSERT_INDEX + 3],
+            values[1][TIMING_INSERT_INDEX + 5],
             legacy_row[TIMING_INSERT_INDEX],
         )
 

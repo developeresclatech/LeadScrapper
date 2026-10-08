@@ -29,6 +29,7 @@ from .pipeline.recency_filter import RecencyFilter
 
 logger = logging.getLogger(__name__)
 _DRIVER_LAUNCH_LOCK = Lock()
+_LOGIN_LOCK = Lock()
 _LOCATION_CACHE_LOCK = Lock()
 _LOCATION_CACHE: dict[str, str] = {}
 
@@ -62,6 +63,8 @@ class UpworkSeleniumScraper:
         self._driver: Optional[uc.Chrome] = None
         self._seen_ids: set[str] = set()
         self._cached_leads: Optional[list[JobLead]] = None
+        self._login_retry_at = 0.0
+        self._authenticated = False
 
     # ==================================================================
     # Public API
@@ -71,6 +74,7 @@ class UpworkSeleniumScraper:
         for attempt in range(2):
             try:
                 leads = self._scrape_keyword(keyword)
+                self.enrich_attachments(leads)
                 self.enrich_client_locations(
                     leads,
                     ensure_logged_in=False,
@@ -205,6 +209,47 @@ class UpworkSeleniumScraper:
             self._driver = None
             logger.info("Browser closed.")
 
+    def enrich_attachments(self, leads: list[JobLead]) -> None:
+        """Inspect authenticated job details without downloading files."""
+        leads = [lead for lead in leads if lead.url and lead.attachment_status == "Not checked"]
+        if not leads:
+            return
+        driver = self._get_driver()
+        for lead in leads:
+            if not lead.url or lead.attachment_status != "Not checked":
+                continue
+            try:
+                driver.get(lead.url)
+                WebDriverWait(driver, self.config.timeout).until(
+                    EC.visibility_of_element_located((By.CSS_SELECTOR,
+                        "[data-test='job-description-text'], [data-test='description' i], "
+                        "[data-qa='job-description'], .job-description"))
+                )
+                if self._is_verification_page(driver) or not self._is_logged_in(driver):
+                    continue
+                self._read_attachments(driver, lead)
+            except (TimeoutException, WebDriverException):
+                logger.debug("Attachments could not be checked for %s", lead.url)
+
+    @staticmethod
+    def _read_attachments(driver, lead: JobLead) -> None:
+        selectors = (
+            "[data-test*='attachment'] a[href], [data-qa*='attachment'] a[href], "
+            "a[href*='/att/download/'], a[href*='/attachments/']"
+        )
+        files = {}
+        for element in driver.find_elements(By.CSS_SELECTOR, selectors):
+            if not element.is_displayed():
+                continue
+            url = element.get_attribute("href")
+            if url and not url.startswith("javascript:"):
+                files[url] = element.text.strip() or element.get_attribute("download") or "Attachment"
+        # Only declare absence after a rendered authenticated detail page.
+        lead.attachment_status = "Yes" if files else "No"
+        lead.attachment_count = len(files)
+        lead.attachment_urls = list(files)
+        lead.attachment_names = list(files.values())
+
     # ==================================================================
     # Selenium Lifecycle
     # ==================================================================
@@ -260,14 +305,57 @@ class UpworkSeleniumScraper:
         )
 
     def _ensure_logged_in(self, driver: uc.Chrome) -> bool:
+        if self._authenticated and self._is_logged_in(driver):
+            return True
+        if time.monotonic() < self._login_retry_at:
+            if self._is_logged_in(driver):
+                self._authenticated = True
+                self._login_retry_at = 0.0
+                return True
+            remaining = max(1, self._login_retry_at - time.monotonic())
+            logger.warning(
+                "Waiting up to %.0fs for manual Upwork login in this worker's "
+                "browser. Complete login/2FA there to resume this keyword.",
+                remaining,
+            )
+            try:
+                WebDriverWait(driver, remaining).until(self._is_logged_in)
+            except TimeoutException:
+                raise RuntimeError(
+                    "Upwork authentication is cooling down after a failed login; "
+                    "manual login was not completed before the cooldown ended."
+                ) from None
+            self._authenticated = True
+            self._login_retry_at = 0.0
+            return True
+        # Serialize authentication only; searches remain parallel.
+        if not _LOGIN_LOCK.acquire(timeout=self.config.upwork_login_timeout):
+            raise RuntimeError("Another Upwork worker is logging in; login lock wait timed out.")
+        try:
+            self._authenticated = self._attempt_login(driver)
+            if not self._authenticated:
+                self._login_retry_at = time.monotonic() + self.config.upwork_login_cooldown
+                raise RuntimeError(
+                    f"Upwork login failed; pausing this worker's login attempts for "
+                    f"{self.config.upwork_login_cooldown}s. Complete verification in its browser."
+                )
+            self._login_retry_at = 0.0
+            return True
+        except Exception:
+            self._login_retry_at = time.monotonic() + self.config.upwork_login_cooldown
+            raise
+        finally:
+            _LOGIN_LOCK.release()
+
+    def _attempt_login(self, driver: uc.Chrome) -> bool:
         username = self.config.upwork_username
         password = self.config.upwork_password
         if not username or not password:
             logger.error("UPWORK_USERNAME or UPWORK_PASSWORD not set in .env")
             return False
 
-        search_url = SEARCH_URL + "?" + urlencode({"sort": "recency", "q": "python"})
-        driver.get(search_url)
+        logger.info("Opening Upwork login page before searching...")
+        driver.get(LOGIN_URL)
         time.sleep(3)
 
         if self._is_verification_page(driver):
@@ -293,13 +381,6 @@ class UpworkSeleniumScraper:
             logger.info("Already logged in.")
             return True
 
-        logger.info("Opening Upwork login page...")
-        driver.get(LOGIN_URL)
-        time.sleep(3)
-        if self._is_logged_in(driver):
-            logger.info("Login page redirected to an authenticated session.")
-            return True
-
         username_entered = self._input_if_present(driver, [
             "input[name='login[username]']",
             "input#login_username",
@@ -311,6 +392,9 @@ class UpworkSeleniumScraper:
             logger.error("Upwork username field was not available; login failed.")
             return False
         time.sleep(2)
+        if self._has_login_error(driver):
+            logger.error("Upwork reported an error after username submission.")
+            return False
 
         password_entered = self._input_if_present(driver, [
             "input[name='login[password]']",
@@ -323,10 +407,16 @@ class UpworkSeleniumScraper:
             logger.error("Upwork password field was not available; login failed.")
             return False
 
-        pause = 90  # seconds for 2FA / manual verification
-        logger.info(f"Waiting up to {pause}s for login/2FA...")
-        end = time.time() + pause
-        while time.time() < end:
+        pause = max(self.config.upwork_login_timeout, self.config.upwork_verification_timeout)
+        logger.info(
+            "Waiting up to %ss for login/2FA. Complete any verification "
+            "in this worker's browser.", pause,
+        )
+        end = time.monotonic() + pause
+        while time.monotonic() < end:
+            if self._has_login_error(driver):
+                logger.error("Upwork rejected the login attempt; stopping this attempt.")
+                return False
             if self._is_logged_in(driver):
                 logger.info("Login successful.")
                 return True
@@ -334,6 +424,17 @@ class UpworkSeleniumScraper:
 
         logger.warning("Login not confirmed within timeout.")
         return False
+
+    @staticmethod
+    def _has_login_error(driver) -> bool:
+        try:
+            text = driver.find_element(By.TAG_NAME, "body").text.casefold()
+            return any(message in text for message in (
+                "due to technical difficulties", "incorrect password",
+                "invalid password", "too many attempts",
+            ))
+        except WebDriverException:
+            return False
 
     @staticmethod
     def _is_logged_in(driver) -> bool:

@@ -21,6 +21,7 @@ from ..storage.sqlite_repository import SQLiteLeadRepository
 from ..timezones import resolve_timezone
 from .rows import processed_lead_to_row
 from .sheet_operations import prepend_rows_requests
+from .schema import attachment_column_requests
 from .schema import (
     COLUMN_WIDTHS,
     COLOR_GREEN,
@@ -296,10 +297,22 @@ class SheetsBatchWriter:
                 }),
             )
             self._write(
+                f"insert attachment columns {name}",
+                lambda: worksheet.spreadsheet.batch_update({"requests": attachment_column_requests(
+                    worksheet.id, LEGACY_SHEET_HEADERS[:4] + TIMING_HEADERS + LEGACY_SHEET_HEADERS[4:])}),
+            )
+            self._write(
                 f"write expanded header {name}",
                 lambda: worksheet.update(
                     range_name=header_range, values=[SHEET_HEADERS]
                 ),
+            )
+        elif attachment_column_requests(worksheet.id, current) is not None:
+            self._write(f"move attachment columns {name}", lambda: worksheet.spreadsheet.batch_update(
+                {"requests": attachment_column_requests(worksheet.id, current)}))
+            self._write(
+                f"append attachment headers {name}",
+                lambda: worksheet.update(range_name=header_range, values=[SHEET_HEADERS]),
             )
         elif current != expected:
             self._write(

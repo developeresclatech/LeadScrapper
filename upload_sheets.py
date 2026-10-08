@@ -19,6 +19,7 @@ from upwork_scraper.exporters.schema import (
     TIMING_INSERT_INDEX,
 )
 from upwork_scraper.exporters.sheet_operations import prepend_rows_requests
+from upwork_scraper.exporters.schema import attachment_column_requests
 
 load_dotenv()
 
@@ -79,6 +80,11 @@ def _ensure_headers(worksheet) -> list[list[str]]:
                 }
             }]
         })
+        worksheet.spreadsheet.batch_update({"requests": attachment_column_requests(worksheet.id,
+            LEGACY_SHEET_HEADERS[:4] + TIMING_HEADERS + LEGACY_SHEET_HEADERS[4:])})
+        worksheet.update(range_name=header_range, values=[SHEET_HEADERS])
+    elif attachment_column_requests(worksheet.id, current) is not None:
+        worksheet.spreadsheet.batch_update({"requests": attachment_column_requests(worksheet.id, current)})
         worksheet.update(range_name=header_range, values=[SHEET_HEADERS])
     elif current != expected:
         worksheet.insert_row(
