@@ -27,6 +27,7 @@ class PlatformScheduler:
         process_leads: (
             Callable[[str, str, list[JobLead]], int] | None
         ) = None,
+        prepare_leads: Callable | None = None,
     ) -> None:
         self.adapters = adapters
         self.keywords = keywords
@@ -34,6 +35,7 @@ class PlatformScheduler:
         self.max_browser_workers = max(1, max_browser_workers)
         self.queue_size = max(1, queue_size)
         self.process_leads = process_leads
+        self.prepare_leads = prepare_leads
 
     def events(self) -> Iterator[SchedulerEvent]:
         queue: Queue[SchedulerEvent] = Queue(maxsize=self.queue_size)
@@ -44,14 +46,33 @@ class PlatformScheduler:
             keyword: str,
         ) -> KeywordResult:
             try:
+                qualified_count = 0
+
+                def emit(lead):
+                    nonlocal qualified_count
+                    qualified_count += self.process_leads(adapter.name, keyword, [lead])
+
+                streaming = adapter.stream_fn is not None and self.process_leads is not None
+
+                def collect():
+                    if streaming:
+                        return adapter.stream_fn(
+                            keyword,
+                            on_lead=emit,
+                            prepare_leads=(
+                                lambda leads: self.prepare_leads(adapter.name, keyword, leads)
+                            ) if self.prepare_leads else None,
+                        )
+                    return adapter.scrape(keyword)
+
                 if adapter.resource_group == "browser":
                     with browser_slots:
-                        leads = adapter.scrape(keyword)
+                        leads = collect()
                 else:
-                    leads = adapter.scrape(keyword)
-                qualified_count = (
+                    leads = collect()
+                qualified_count += (
                     self.process_leads(adapter.name, keyword, leads)
-                    if self.process_leads is not None
+                    if self.process_leads is not None and not streaming
                     else 0
                 )
                 return KeywordResult(

@@ -291,7 +291,7 @@ class ScraperConfig:
     catch_up_after_hours: float = 14.0
     catch_up_max_results_per_keyword: int = 150
     catch_up_max_pages: int = 3
-    keep_unknown_posted_dates: bool = True
+    keep_unknown_posted_dates: bool = False
     normal_keep_unknown_posted_dates: bool = False
     # Runtime value set by LeadEngine for age-aware platform pagination.
     collection_recency_hours: float | None = None
@@ -325,6 +325,7 @@ class ScraperConfig:
     # Selenium / authenticated Upwork
     upwork_username: str = os.getenv("UPWORK_USERNAME", "")
     upwork_password: str = os.getenv("UPWORK_PASSWORD", "")
+    upwork_manual_login: bool = os.getenv("UPWORK_MANUAL_LOGIN", "false").lower() in {"1", "true", "yes"}
     selenium_max_scrolls: int = 8
     selenium_command_timeout: float = 45.0
     upwork_location_timeout: int = 12

@@ -9,6 +9,7 @@ import time
 import json
 import logging
 import os
+import sys
 from urllib.parse import urlencode
 from datetime import datetime, timezone
 from threading import Lock
@@ -58,30 +59,27 @@ class UpworkSeleniumScraper:
     """Scrape Upwork job data using Selenium with undetected_chromedriver.
     Requires a logged-in Upwork session (credentials in .env)."""
 
-    def __init__(self, config: Optional[ScraperConfig] = None):
+    def __init__(self, config: Optional[ScraperConfig] = None, *, profile_worker: int = 0):
         self.config = config or ScraperConfig()
+        self._profile_worker = profile_worker
         self._driver: Optional[uc.Chrome] = None
         self._seen_ids: set[str] = set()
         self._cached_leads: Optional[list[JobLead]] = None
         self._login_retry_at = 0.0
         self._authenticated = False
+        self._manual_login_pending = False
 
     # ==================================================================
     # Public API
     # ==================================================================
 
-    def search_keyword(self, keyword: str) -> list[JobLead]:
+    def search_keyword(self, keyword: str, *, on_lead=None, prepare_leads=None) -> list[JobLead]:
         for attempt in range(2):
             try:
                 leads = self._scrape_keyword(keyword)
-                self.enrich_attachments(leads)
-                self.enrich_client_locations(
-                    leads,
-                    ensure_logged_in=False,
-                )
-                return leads[:self.config.max_results_per_keyword]
+                break
             except Exception as exc:
-                if attempt == 0 and self._is_browser_failure(exc):
+                if attempt == 0 and not self._manual_login_pending and self._is_browser_failure(exc):
                     logger.warning(
                         "Upwork browser failed for '%s'; restarting its "
                         "isolated browser and retrying once: %s",
@@ -91,7 +89,19 @@ class UpworkSeleniumScraper:
                     self._discard_driver()
                     continue
                 raise
-        return []
+        candidates = prepare_leads(leads) if prepare_leads else leads
+        logger.info("Upwork worker %d: %d searched, %d detail checks; saving each completed lead.",
+                    self._profile_worker + 1, len(leads), len(candidates))
+        for lead in candidates:
+            try:
+                self.enrich_attachments([lead])
+                self.enrich_client_locations([lead], ensure_logged_in=False)
+            except Exception as exc:
+                logger.warning("Detail check incomplete for %s (%s); preserving collected data.",
+                               lead.job_id or lead.title, type(exc).__name__)
+            if on_lead:
+                on_lead(lead)
+        return leads[:self.config.max_results_per_keyword]
 
     def enrich_client_locations(
         self,
@@ -167,6 +177,8 @@ class UpworkSeleniumScraper:
             unavailable_count,
         )
 
+        
+
     def _resolve_client_location(self, driver, url: str) -> str:
         driver.get(url)
         selector = ", ".join(CLIENT_LOCATION_SELECTORS)
@@ -215,9 +227,13 @@ class UpworkSeleniumScraper:
         if not leads:
             return
         driver = self._get_driver()
-        for lead in leads:
+        for index, lead in enumerate(leads, 1):
             if not lead.url or lead.attachment_status != "Not checked":
                 continue
+            logger.info(
+                "Upwork worker %d: attachment check %d/%d for '%s'.",
+                self._profile_worker + 1, index, len(leads), lead.keyword_searched,
+            )
             try:
                 driver.get(lead.url)
                 WebDriverWait(driver, self.config.timeout).until(
@@ -229,7 +245,15 @@ class UpworkSeleniumScraper:
                     continue
                 self._read_attachments(driver, lead)
             except (TimeoutException, WebDriverException):
-                logger.debug("Attachments could not be checked for %s", lead.url)
+                logger.warning(
+                    "Upwork worker %d: attachment check %d/%d unavailable; "
+                    "continuing with attachment status unknown.",
+                    self._profile_worker + 1, index, len(leads),
+                )
+        logger.info(
+            "Upwork worker %d: attachment checks finished for %d jobs.",
+            self._profile_worker + 1, len(leads),
+        )
 
     @staticmethod
     def _read_attachments(driver, lead: JobLead) -> None:
@@ -260,6 +284,11 @@ class UpworkSeleniumScraper:
                 self._driver.current_url
                 return self._driver
             except Exception:
+                if self._manual_login_pending:
+                    raise RuntimeError(
+                        "Manual-login browser is disconnected. Automatic restart is paused; "
+                        "stop the scraper and restart it when ready."
+                    ) from None
                 logger.info("Browser session lost, recreating...")
                 self._discard_driver()
         logger.info("Launching Chrome via undetected_chromedriver...")
@@ -269,12 +298,19 @@ class UpworkSeleniumScraper:
                 "--disable-blink-features=AutomationControlled"
             )
             options.add_argument("--start-maximized")
+            options.add_experimental_option("prefs", {
+                "credentials_enable_service": True,
+                "profile.password_manager_enabled": True,
+            })
+            profile_directory = os.getenv("UPWORK_CHROME_PROFILE_DIRECTORY", "Default").strip() or "Default"
+            options.add_argument(f"--profile-directory={profile_directory}")
             if os.getenv("RUNNING_IN_CONTAINER") == "1":
                 options.add_argument("--no-sandbox")
                 options.add_argument("--disable-dev-shm-usage")
             launch_options: dict[str, object] = {"options": options}
-            launch_options.update(chrome_launch_options())
+            launch_options.update(chrome_launch_options(profile_name="upwork", profile_worker=self._profile_worker))
             self._driver = uc.Chrome(**launch_options)
+            logger.info("Chrome automation connected; preparing Upwork navigation.")
         self._driver.set_page_load_timeout(120)
         client_config = getattr(
             self._driver.command_executor,
@@ -305,6 +341,8 @@ class UpworkSeleniumScraper:
         )
 
     def _ensure_logged_in(self, driver: uc.Chrome) -> bool:
+        if self.config.upwork_manual_login:
+            return self._ensure_manual_login(driver)
         if self._authenticated and self._is_logged_in(driver):
             return True
         if time.monotonic() < self._login_retry_at:
@@ -347,22 +385,56 @@ class UpworkSeleniumScraper:
         finally:
             _LOGIN_LOCK.release()
 
-    def _attempt_login(self, driver: uc.Chrome) -> bool:
-        username = self.config.upwork_username
-        password = self.config.upwork_password
-        if not username or not password:
-            logger.error("UPWORK_USERNAME or UPWORK_PASSWORD not set in .env")
-            return False
+    def _ensure_manual_login(self, driver: uc.Chrome) -> bool:
+        """Leave the same page open for the operator; never fill credentials."""
+        try:
+            if self._is_logged_in(driver):
+                self._authenticated = True
+                self._manual_login_pending = False
+                self._login_retry_at = 0.0
+                return True
+            if not self._manual_login_pending:
+                self._manual_login_pending = True
+                driver.get(SEARCH_URL)
+                time.sleep(3)
+                if self._is_logged_in(driver):
+                    self._authenticated = True
+                    self._manual_login_pending = False
+                    return True
+                # Leave a verification challenge untouched. Otherwise open
+                # login once, and retain this page across subsequent waits.
+                if not self._is_verification_page(driver):
+                    driver.get(LOGIN_URL)
+            self._authenticated = False
+            timeout = max(1, self.config.upwork_verification_timeout)
+            logger.warning(
+                "Upwork worker %d: complete manual login/verification in its "
+                "browser. Waiting %ss; credentials will not be submitted "
+                "automatically and this page will stay open.",
+                self._profile_worker + 1, timeout,
+            )
+            WebDriverWait(driver, timeout).until(self._is_logged_in)
+        except TimeoutException:
+            raise RuntimeError(
+                "Manual Upwork login is still pending; browser remains open. "
+                "Complete sign-in there to resume subsequent work."
+            ) from None
+        except Exception as exc:
+            raise RuntimeError(
+                "Manual Upwork login could not be checked; automatic browser "
+                "restart and credential submission are paused."
+            ) from exc
+        self._authenticated = True
+        self._manual_login_pending = False
+        self._login_retry_at = 0.0
+        return True
 
-        logger.info("Opening Upwork login page before searching...")
-        driver.get(LOGIN_URL)
-        time.sleep(3)
-
+    def _wait_for_verification(self, driver: uc.Chrome) -> bool:
         if self._is_verification_page(driver):
             timeout = max(1, self.config.upwork_verification_timeout)
             logger.warning(
-                "Upwork verification is required. Open "
-                "http://localhost:7900/vnc.html and complete it within "
+                "Upwork verification is required. Complete it in this "
+                "worker's browser (Docker: http://localhost:7900/vnc.html) within "
                 "%d seconds.",
                 timeout,
             )
@@ -376,10 +448,34 @@ class UpworkSeleniumScraper:
                     timeout,
                 )
                 return False
+        return True
+
+    def _attempt_login(self, driver: uc.Chrome) -> bool:
+        username = self.config.upwork_username
+        password = self.config.upwork_password
+        logger.info("Checking the saved Upwork session before logging in...")
+        driver.get(SEARCH_URL)
+        time.sleep(3)
+        if not self._wait_for_verification(driver):
+            return False
 
         if self._is_logged_in(driver):
             logger.info("Already logged in.")
             return True
+
+        logger.info("Saved session is unauthenticated; opening Upwork login page...")
+        driver.get(LOGIN_URL)
+        time.sleep(3)
+        if not self._wait_for_verification(driver):
+            return False
+
+        if not username or not password:
+            logger.info("No Upwork credentials configured; complete login in the saved-profile browser.")
+            try:
+                WebDriverWait(driver, max(1, self.config.upwork_verification_timeout)).until(self._is_logged_in)
+                return True
+            except TimeoutException:
+                return False
 
         username_entered = self._input_if_present(driver, [
             "input[name='login[username]']",
@@ -474,7 +570,7 @@ class UpworkSeleniumScraper:
                 return True
             # The signed-in find-work dashboard uses a sidebar rather than
             # the older account menu. Require personal dashboard content too.
-            if "/nx/find-work/" in driver.current_url:
+            if any(path in driver.current_url for path in ("/nx/find-work/", "/nx/s/find-work/")):
                 body = driver.find_element(By.TAG_NAME, "body").text.casefold()
                 return "profile visibility" in body and "connects:" in body
             return False
@@ -492,6 +588,7 @@ class UpworkSeleniumScraper:
             "just a moment" in title
             or "cloudflare ray id" in body
             or "verify you are human" in body
+            or "we couldn't complete verification" in body
         )
 
     @staticmethod
@@ -512,8 +609,18 @@ class UpworkSeleniumScraper:
             el = WebDriverWait(driver, timeout).until(field_or_session)
             if el is True:
                 return False  # Caller confirms the newly authenticated session.
-            el.clear()
-            el.send_keys(value)
+            # Autofill and controlled inputs can restore text after clear().
+            # Replace through keyboard events and verify before submitting.
+            for _ in range(2):
+                if el.get_attribute("value") == value:
+                    break
+                el.click()
+                el.send_keys(Keys.COMMAND if sys.platform == "darwin" else Keys.CONTROL, "a")
+                el.send_keys(Keys.BACKSPACE)
+                el.send_keys(value)
+            if el.get_attribute("value") != value:
+                logger.warning("Login field did not retain the intended value; submission stopped.")
+                return False
             if submit:
                 el.send_keys(Keys.ENTER)
             return True
@@ -831,7 +938,8 @@ class UpworkSeleniumScraper:
         for pat in patterns:
             m = re.search(pat, text, re.IGNORECASE)
             if m:
-                return m.group(1).strip()
+                return re.split(r"[\u00b7\u2022]|\bProposals\s*:", m.group(1),
+                                maxsplit=1, flags=re.IGNORECASE)[0].strip(" \t|\u00c2")
         return ""
 
     @staticmethod

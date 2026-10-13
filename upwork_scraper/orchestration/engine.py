@@ -35,7 +35,7 @@ console = Console()
 class LeadEngine:
     """Coordinate platform workers, processing, persistence, and output."""
 
-    def __init__(self, config: ScraperConfig | None = None) -> None:
+    def __init__(self, config: ScraperConfig | None = None, *, upwork_session=None) -> None:
         self.config = config or ScraperConfig()
         self.run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         self.all_leads: list[JobLead] = []
@@ -70,8 +70,9 @@ class LeadEngine:
         self.config.page_limit = self.run_policy.page_limit
         self.config.collection_recency_hours = self.run_policy.recency_hours
 
-        self._adapters = build_platform_adapters(self.config)
+        self._adapters = build_platform_adapters(self.config, upwork_session=upwork_session)
         self._deduplicator = RunDeduplicator()
+        self._detail_deduplicator = RunDeduplicator()
         self._processor_local = local()
         self._sheets = SheetsBatchWriter(self.config, self._repository)
         self._output = PlatformOutputWorkers(
@@ -133,6 +134,7 @@ class LeadEngine:
             max_browser_workers=self.config.max_browser_workers,
             queue_size=self.config.event_queue_size,
             process_leads=self._process_scraped_leads,
+            prepare_leads=self._prepare_detail_leads,
         )
 
         for event in scheduler.events():
@@ -214,6 +216,16 @@ class LeadEngine:
             f"[green]{event.qualified_count} qualified/new[/green]"
         )
 
+    def _prepare_detail_leads(self, platform_worker, keyword, leads):
+        self._repository.checkpoint_search(keyword, leads)
+        recency = RecencyFilter(
+            min(24.0, self.run_policy.recency_hours)
+            if self.run_policy.recency_hours is not None else 24.0,
+            keep_unknown=False, strict_date_only=True,
+        )
+        return [lead for lead in leads
+                if recency.matches(lead) and self._detail_deduplicator.accept(lead)]
+
     def _process_scraped_leads(
         self,
         platform_worker: str,
@@ -227,13 +239,10 @@ class LeadEngine:
                 LeadAnalyzer(),
                 self._deduplicator,
                 RecencyFilter(
-                    self.run_policy.recency_hours,
-                    keep_unknown=(
-                        self.config.keep_unknown_posted_dates
-                        if self.run_policy.is_catch_up
-                        else self.config.normal_keep_unknown_posted_dates
-                    ),
-                    strict_date_only=not self.run_policy.is_catch_up,
+                    min(24.0, self.run_policy.recency_hours)
+                    if self.run_policy.recency_hours is not None else 24.0,
+                    keep_unknown=False,
+                    strict_date_only=True,
                 ),
             )
             self._processor_local.processor = processor
@@ -291,7 +300,7 @@ class LeadEngine:
             str(sum(counts["RED"] for counts in summary.values())),
         )
         console.print(table)
-
+         
     def _print_sheets_summary(self) -> None:
         if not self._sheets.enabled:
             console.print("[yellow]Google Sheets: disabled[/yellow]")

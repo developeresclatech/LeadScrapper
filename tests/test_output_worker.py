@@ -13,6 +13,9 @@ from upwork_scraper.pipeline.processor import ProcessedLead
 
 
 class _RepositoryFake:
+    def pending_uploads(self):
+        return []
+
     def __init__(self) -> None:
         self.saved: list[tuple[str, str]] = []
         self.threads: list[str] = []
@@ -48,7 +51,7 @@ class _SheetsFake:
 
 
 class OutputWorkerTests(unittest.TestCase):
-    def test_sqlite_and_sheets_are_owned_by_output_thread(self) -> None:
+    def test_sqlite_commits_before_async_sheets_output(self) -> None:
         repository = _RepositoryFake()
         sheets = _SheetsFake()
         worker = LeadOutputWorker(
@@ -73,7 +76,7 @@ class OutputWorkerTests(unittest.TestCase):
         self.assertEqual(len(worker.processed), 1)
         self.assertTrue(
             all(
-                name == "upwork_selenium-output"
+                name == threading.current_thread().name
                 for name in repository.threads
             )
         )
@@ -109,7 +112,7 @@ class OutputWorkerTests(unittest.TestCase):
 
         self.assertEqual(
             set(repository.threads),
-            {"upwork_selenium-output", "guru-output"},
+            {threading.current_thread().name},
         )
         self.assertEqual(len(pool.processed), 2)
 

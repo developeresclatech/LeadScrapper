@@ -29,6 +29,11 @@ class _FlushPlatform:
     platform_label: str
 
 
+@dataclass(frozen=True)
+class _ReplayUploads:
+    entries: list
+
+
 class _Stop:
     pass
 
@@ -79,8 +84,15 @@ class LeadOutputWorker:
         item: ProcessedLead,
         dedup_key: str,
     ) -> None:
+        # Commit before queueing: a slow or unavailable Sheets connection must
+        # not leave accepted leads existing only in a process's memory.
+        upload_key = self.repository.save(self.platform_worker, keyword, item, dedup_key)
+        with self._collection_lock:
+            self.processed.append(item)
+            self.all_leads.append(item.lead)
+            self.all_analyses[item.lead.title] = item.analysis
         self.queue.put(
-            _SaveLead(self.platform_worker, keyword, item, dedup_key)
+            _SaveLead(self.platform_worker, keyword, item, upload_key or dedup_key)
         )
 
     def flush(self) -> None:
@@ -111,6 +123,9 @@ class LeadOutputWorker:
                     return
                 if isinstance(command, _SaveLead):
                     self._save(command)
+                elif isinstance(command, _ReplayUploads):
+                    for item, key in command.entries:
+                        self.sheets.add(item, key)
                 elif isinstance(command, _FlushPlatform):
                     self.sheets.flush_platform(command.platform_label)
             except Exception as exc:
@@ -121,18 +136,6 @@ class LeadOutputWorker:
                 self.queue.task_done()
 
     def _save(self, command: _SaveLead) -> None:
-        self.repository.save(
-            command.platform_worker,
-            command.keyword,
-            command.item,
-            command.dedup_key,
-        )
-        with self._collection_lock:
-            self.processed.append(command.item)
-            self.all_leads.append(command.item.lead)
-            self.all_analyses[
-                command.item.lead.title
-            ] = command.item.analysis
         self.sheets.add(command.item, command.dedup_key)
 
 
@@ -167,6 +170,13 @@ class PlatformOutputWorkers:
     def start(self) -> None:
         if self._started:
             return
+        pending = self._repository.pending_uploads()
+        if pending and self._sheets.enabled:
+            # A dedicated output queue replays durable records without holding
+            # up browser workers or falsely adding them to this run's totals.
+            recovery = self._ensure_worker("pending_uploads")
+            recovery.start()
+            recovery.queue.put(_ReplayUploads(pending))
         for worker in self._workers.values():
             worker.start()
         self._started = True

@@ -20,6 +20,7 @@ from rich.logging import RichHandler
 
 from upwork_scraper.config import ScraperConfig, ALL_PLATFORMS
 from upwork_scraper.engine import LeadEngine
+from upwork_scraper.platforms.upwork_session import UpworkBrowserSession
 
 console = Console()
 
@@ -150,6 +151,14 @@ def build_config(
 
 
 def run_session(args: argparse.Namespace) -> int:
+    browsers = UpworkBrowserSession(build_config(args).upwork_keyword_workers)
+    try:
+        return _run_session(args, browsers)
+    finally:
+        browsers.close()
+
+
+def _run_session(args: argparse.Namespace, browsers) -> int:
     max_runs = None if args.continuous else args.runs
     attempted = 0
     completed = 0
@@ -168,7 +177,7 @@ def run_session(args: argparse.Namespace) -> int:
                 args,
                 force_catch_up=args.catch_up and attempted == 1,
             )
-            engine = LeadEngine(config)
+            engine = LeadEngine(config, upwork_session=browsers)
             engine.run()
             completed += 1
         except KeyboardInterrupt:

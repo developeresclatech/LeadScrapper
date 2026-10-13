@@ -29,3 +29,5 @@ finally:
     Path("output/live_attachment_check.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     scraper.close()
     print("Attachment status:", lead.attachment_status, "count:", lead.attachment_count)
+
+

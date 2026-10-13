@@ -17,6 +17,8 @@ from requests.exceptions import ConnectionError, SSLError, Timeout
 
 from ..config import ScraperConfig
 from ..pipeline.processor import ProcessedLead
+from ..pipeline.deduplicator import RunDeduplicator
+from ..models import JobLead
 from ..storage.sqlite_repository import SQLiteLeadRepository
 from ..timezones import resolve_timezone
 from .rows import processed_lead_to_row
@@ -72,6 +74,7 @@ class SheetsBatchWriter:
         self._buffers: dict[str, list[_BufferedLead]] = defaultdict(list)
         self._states: dict[str, _WorksheetState] = {}
         self._spreadsheet = None
+        self._http_session = None
         self._next_write_at = 0.0
         self._retry_not_before: dict[str, float] = defaultdict(float)
         self._stats: dict[str, Counter] = defaultdict(Counter)
@@ -153,6 +156,7 @@ class SheetsBatchWriter:
             return
         import gspread
         from google.oauth2.service_account import Credentials
+        from google.auth.transport.requests import AuthorizedSession
 
         credentials = Credentials.from_service_account_file(
             self.config.google_credentials_path,
@@ -161,13 +165,15 @@ class SheetsBatchWriter:
                 "https://www.googleapis.com/auth/drive",
             ],
         )
-        client = gspread.authorize(credentials)
+        self._http_session = AuthorizedSession(credentials, refresh_timeout=30)
+        client = gspread.Client(auth=credentials, session=self._http_session)
+        client.http_client.set_timeout((10, 30))
         self._spreadsheet = self._write(
             "open spreadsheet",
             lambda: client.open_by_key(self.config.google_sheet_id),
         )
 
-    def _write(self, operation: str, call: Callable[[], _T]) -> _T:
+    def _write(self, operation: str, call: Callable[[], _T], *, retry_transport: bool = True) -> _T:
         """Run one Sheets write with throttling and bounded retries."""
         attempts = max(1, getattr(self.config, "sheets_retry_attempts", 5))
         base_delay = max(
@@ -190,6 +196,15 @@ class SheetsBatchWriter:
                 result = call()
             except Exception as exc:
                 self._next_write_at = self._monotonic() + interval
+                if isinstance(exc, (ConnectionError, SSLError, Timeout)):
+                    if self._http_session is not None:
+                        # Drop pooled sockets; subsequent requests establish a
+                        # fresh TLS connection with certificate checks intact.
+                        self._http_session.close()
+                    if not retry_transport:
+                        # A lost response does not mean a row insertion failed.
+                        # Re-read the sheet on the next flush before inserting.
+                        raise
                 if not self._is_retryable(exc) or attempt + 1 >= attempts:
                     raise
 
@@ -198,9 +213,10 @@ class SheetsBatchWriter:
                     max_delay, base_delay * (2 ** attempt)
                 )
                 logger.warning(
-                    "Sheets %s was rate-limited/temporarily unavailable; "
+                    "Sheets %s failed (%s); "
                     "retrying in %.1fs (attempt %d/%d).",
                     operation,
+                    type(exc).__name__,
                     delay,
                     attempt + 2,
                     attempts,
@@ -335,14 +351,19 @@ class SheetsBatchWriter:
                 worksheet.set_basic_filter,
             )
         except Exception as exc:
-            logger.warning("Worksheet layout failed for %s: %s", name, exc)
-            if self._is_retryable(exc):
-                raise
+            # Widths, colors and filters are cosmetic. Headers/schema above
+            # must succeed, but a styling failure must not reject lead data.
+            logger.warning(
+                "Worksheet layout failed for %s (%s); continuing lead upload "
+                "without completing formatting.", name, type(exc).__name__,
+            )
 
         headers = [value.casefold().strip() for value in values[0]]
         title_index = headers.index("job title") if "job title" in headers else 0
+        url_index = headers.index("job url") if "job url" in headers else -1
         titles = {
-            self._title_key(row[title_index])
+            RunDeduplicator.key(JobLead(title=row[title_index],
+                url=row[url_index] if url_index >= 0 and len(row) > url_index else ""))
             for row in values[1:]
             if len(row) > title_index and row[title_index]
         }
@@ -480,6 +501,8 @@ class SheetsBatchWriter:
                 primary_result,
             )
         except Exception as exc:
+            if isinstance(exc, (ConnectionError, SSLError, Timeout)):
+                self._states.pop(sheet_name, None)
             logger.error(
                 "Sheets batch upload failed for %s (%d leads): %s",
                 sheet_name,
@@ -510,11 +533,13 @@ class SheetsBatchWriter:
         self, tab_name: str, batch: list[_BufferedLead]
     ) -> _AppendResult:
         state = self._worksheet_state(tab_name)
-        new_entries = [
-            entry
-            for entry in batch
-            if self._title_key(entry.item.lead.title) not in state.titles
-        ]
+        new_entries = []
+        seen = set(state.titles)
+        for entry in batch:
+            identity = RunDeduplicator.key(entry.item.lead)
+            if identity not in seen:
+                new_entries.append(entry)
+                seen.add(identity)
         new_ids = {id(entry) for entry in new_entries}
         duplicates = [
             entry for entry in batch if id(entry) not in new_ids
@@ -552,9 +577,10 @@ class SheetsBatchWriter:
             lambda: state.worksheet.spreadsheet.batch_update(
                 {"requests": requests}
             ),
+            retry_transport=False,
         )
         state.titles.update(
-            self._title_key(entry.item.lead.title)
+            RunDeduplicator.key(entry.item.lead)
             for entry in new_entries
         )
         self._format_rows(state.worksheet, start_row, new_entries)

@@ -10,6 +10,9 @@ from pathlib import Path
 from threading import Lock
 
 from ..pipeline.processor import ProcessedLead
+from ..pipeline.deduplicator import RunDeduplicator
+from ..models import JobLead
+from ..analyzer import LeadAnalysis
 
 
 class SQLiteLeadRepository:
@@ -62,6 +65,41 @@ class SQLiteLeadRepository:
                 "ALTER TABLE daily_runs ADD COLUMN completed_at TEXT"
             )
         self._connection.commit()
+
+        # Only new writes enter the outbox: historical rows may have been
+        # accepted under older recency/qualification rules.
+        self._connection.execute("""CREATE TABLE IF NOT EXISTS upload_outbox (
+            lead_id INTEGER PRIMARY KEY REFERENCES processed_leads(id))""")
+        self._connection.execute("""CREATE TABLE IF NOT EXISTS search_checkpoints (
+            identity TEXT PRIMARY KEY, keyword TEXT NOT NULL,
+            lead_json TEXT NOT NULL, checked_json TEXT)""")
+        self._connection.commit()
+
+    def checkpoint_search(self, keyword: str, leads: list[JobLead]) -> None:
+        with self._lock:
+            for lead in leads:
+                self._connection.execute("""INSERT INTO search_checkpoints
+                    (identity, keyword, lead_json) VALUES (?, ?, ?)
+                    ON CONFLICT(identity) DO UPDATE SET
+                        keyword=excluded.keyword, lead_json=excluded.lead_json""",
+                    (RunDeduplicator.key(lead), keyword, lead.model_dump_json()))
+            self._connection.commit()
+
+    def completed_details(self, lead: JobLead) -> JobLead | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT checked_json FROM search_checkpoints WHERE identity=?",
+                (RunDeduplicator.key(lead),),
+            ).fetchone()
+        return JobLead.model_validate_json(row[0]) if row and row[0] else None
+
+    def pending_uploads(self):
+        with self._lock:
+            rows = self._connection.execute("""SELECT p.id, p.lead_json, p.analysis_json
+                FROM processed_leads p JOIN upload_outbox o ON o.lead_id=p.id
+                WHERE p.uploaded=0 ORDER BY p.id""").fetchall()
+        return [(ProcessedLead(JobLead.model_validate_json(lead), LeadAnalysis(**json.loads(analysis))),
+                 f"outbox:{identifier}") for identifier, lead, analysis in rows]
 
     def latest_completed_at(self) -> str | None:
         """Return the most recent successful run completion timestamp."""
@@ -121,7 +159,7 @@ class SQLiteLeadRepository:
         keyword: str,
         item: ProcessedLead,
         dedup_key: str,
-    ) -> None:
+    ) -> str:
         with self._lock:
             self._connection.execute(
                 """
@@ -139,13 +177,28 @@ class SQLiteLeadRepository:
                     json.dumps(asdict(item.analysis), default=str),
                 ),
             )
+            row_id = self._connection.execute(
+                "SELECT id FROM processed_leads WHERE run_id=? AND dedup_key=?",
+                (self.run_id, dedup_key),
+            ).fetchone()[0]
+            self._connection.execute("INSERT OR IGNORE INTO upload_outbox VALUES (?)", (row_id,))
+            if item.lead.attachment_status in {"Yes", "No"}:
+                self._connection.execute(
+                    "UPDATE search_checkpoints SET checked_json=? WHERE identity=?",
+                    (item.lead.model_dump_json(), RunDeduplicator.key(item.lead)),
+                )
             self._connection.commit()
+            return f"outbox:{row_id}"
 
     def mark_uploaded(self, dedup_keys: list[str]) -> None:
         if not dedup_keys:
             return
         placeholders = ",".join("?" for _ in dedup_keys)
         with self._lock:
+            for key in dedup_keys:
+                if key.startswith("outbox:"):
+                    self._connection.execute("UPDATE processed_leads SET uploaded=1 WHERE id=?",
+                                             (int(key.split(":", 1)[1]),))
             self._connection.execute(
                 f"""
                 UPDATE processed_leads

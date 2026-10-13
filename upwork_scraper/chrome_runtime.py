@@ -89,6 +89,9 @@ def detect_chrome_major(browser_path: str) -> int | None:
 def chrome_launch_options(
     environ: Mapping[str, str] | None = None,
     browser_finder: Callable[[], str | None] | None = None,
+    *,
+    profile_name: str | None = None,
+    profile_worker: int = 0,
 ) -> dict[str, object]:
     """Build portable keyword arguments for ``uc.Chrome``.
 
@@ -108,7 +111,44 @@ def chrome_launch_options(
         options["browser_executable_path"] = browser_path
     if driver_path:
         options["driver_executable_path"] = driver_path
-    if profile_root:
+    if profile_name == "upwork":
+        configured_profile = (env.get("UPWORK_CHROME_USER_DATA_DIR") or "").strip()
+        if configured_profile and "YOUR_USER" in configured_profile.upper():
+            raise ValueError(
+                "UPWORK_CHROME_USER_DATA_DIR contains the YOUR_USER example "
+                "placeholder. Set your actual Chrome User Data path, or leave "
+                "it empty to use the saved scraper profile."
+            )
+        profile_path = (
+            Path(configured_profile).expanduser()
+            if configured_profile
+            else Path(profile_root or Path(__file__).resolve().parent.parent / "browser-profiles") / "upwork"
+        ).resolve()
+        local_app_data = env.get("LOCALAPPDATA", "")
+        if configured_profile and local_app_data:
+            chrome_default_root = (Path(local_app_data) / "Google" / "Chrome" / "User Data").resolve()
+            if str(profile_path).casefold() == str(chrome_default_root).casefold():
+                raise ValueError(
+                    "Chrome 136+ cannot be automated using its normal User Data "
+                    "directory. Leave UPWORK_CHROME_USER_DATA_DIR empty to use "
+                    "the persistent scraper profile, and sign in there once."
+                )
+        if configured_profile and not profile_path.is_dir():
+            raise ValueError(
+                f"UPWORK_CHROME_USER_DATA_DIR does not exist: {profile_path}. "
+                "Choose an existing Chrome User Data directory, or leave it "
+                "empty to use the saved scraper profile."
+            )
+        if profile_worker < 0:
+            raise ValueError("profile_worker must be non-negative")
+        if profile_worker:
+            # Keep worker zero's existing login; other workers have independent
+            # user-data roots so Chrome does not lock a shared profile.
+            profile_path = profile_path.with_name(f"{profile_path.name}-worker-{profile_worker + 1}")
+        profile_path.mkdir(parents=True, exist_ok=True)
+        options["user_data_dir"] = str(profile_path)
+        logger.info("Using persistent Upwork Chrome profile: %s", profile_path)
+    elif profile_root:
         worker_name = re.sub(
             r"[^A-Za-z0-9_.-]+",
             "-",

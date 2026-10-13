@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+from threading import Thread
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ def _neutralize_driver_destructor(driver: object) -> None:
         pass
 
 
-def close_chrome_safely(driver: object | None) -> None:
+def close_chrome_safely(driver: object | None, *, timeout: float = 5.0) -> None:
     """Quit Chrome once, then make uc.Chrome.__del__ harmless.
 
     undetected-chromedriver 3.5.5 calls quit() unconditionally from __del__.
@@ -38,17 +39,25 @@ def close_chrome_safely(driver: object | None) -> None:
     if driver is None:
         return
 
-    try:
-        driver.quit()
-    except Exception as exc:
-        logger.debug("Chrome quit raised during cleanup: %s", exc)
+    def quit_browser():
         try:
-            driver.close()
-        except Exception:
-            pass
-    finally:
-        # The library destructor first tries service.process.kill(), then calls
-        # self.quit() again. Neutralize both operations on this closed instance.
+            driver.quit()
+        except Exception as exc:
+            logger.debug("Chrome quit raised during cleanup: %s", exc)
+            try:
+                driver.close()
+            except Exception:
+                pass
+
+    # Chrome's quit() may block on a dead driver. A daemon helper prevents that
+    # command from trapping a session executor (which Python joins at exit).
+    closer = Thread(target=quit_browser, name="chrome-cleanup", daemon=True)
+    closer.start()
+    closer.join(timeout=max(0, timeout))
+    if closer.is_alive():
+        logger.warning("Chrome cleanup timed out; stopping this browser's processes.")
+        discard_chrome_safely(driver)
+    else:
         _neutralize_driver_destructor(driver)
 
 

@@ -10,7 +10,6 @@ from ..config import ScraperConfig
 from ..freelancer import FreelancerScraper
 from ..guru import GuruScraper
 from ..scraper import UpworkScraper
-from ..selenium_scraper import UpworkSeleniumScraper
 from ..vollna import VollnaScraper
 from .base import PlatformAdapter
 
@@ -43,7 +42,7 @@ class _ThreadLocalScraperPool:
                 close()
 
 
-def build_platform_adapters(config: ScraperConfig) -> dict[str, PlatformAdapter]:
+def build_platform_adapters(config: ScraperConfig, upwork_session=None) -> dict[str, PlatformAdapter]:
     """Build enabled scraper instances without changing their core behavior."""
     adapters: dict[str, PlatformAdapter] = {}
     resolved_platforms = config.resolved_platforms
@@ -61,17 +60,17 @@ def build_platform_adapters(config: ScraperConfig) -> dict[str, PlatformAdapter]
         )
 
     if "upwork_selenium" in resolved_platforms:
-        pool = _ThreadLocalScraperPool(
-            lambda: UpworkSeleniumScraper(config)
-        )
+        from .upwork_session import UpworkBrowserSession
+        owns_session = upwork_session is None
+        session = upwork_session or UpworkBrowserSession(config.upwork_keyword_workers)
+        session.begin_run(config)
         adapters["upwork_selenium"] = PlatformAdapter(
             "upwork_selenium",
-            lambda keyword, worker_pool=pool: (
-                worker_pool.get().search_keyword(keyword)
-            ),
-            pool.close,
+            session.search_keyword,
+            session.close if owns_session else None,
             resource_group="browser",
-            keyword_workers=config.upwork_keyword_workers,
+            keyword_workers=session.worker_count,
+            stream_fn=session.search_keyword,
         )
 
     if "vollna" in resolved_platforms:

@@ -92,19 +92,27 @@ class RecencyFilter:
         if reference.tzinfo is None:
             reference = reference.replace(tzinfo=timezone.utc)
 
-        lowered = text.casefold().replace("posted ", "").strip()
+        # Upwork combines the posting label and proposal count on one line.
+        text = re.split(r"[·•]|\bProposals\s*:", text, maxsplit=1, flags=re.IGNORECASE)[0].strip(" \t|Â")
+        lowered = re.sub(r"^posted\s+", "", text, flags=re.IGNORECASE).casefold().strip()
         if lowered in {"just now", "now"}:
             return reference
         if lowered == "yesterday":
             return reference - timedelta(days=1)
 
+        named_period = re.fullmatch(r"last\s+(week|month|quarter|year)", lowered)
+        if named_period:
+            # These coarse labels cannot qualify for a <=24-hour window.
+            days = {"week": 7, "month": 30, "quarter": 90, "year": 365}
+            return reference - timedelta(days=days[named_period.group(1)])
+
         relative = re.search(
-            r"(\d+)\s*"
-            r"(second|minute|hour|day|week|month)s?\s+ago",
+            r"(\d+|an?|one)\s*"
+            r"(second|minute|hour|day|week|month|quarter|year)s?\s+ago",
             lowered,
         )
         if relative:
-            amount = int(relative.group(1))
+            amount = 1 if relative.group(1) in {"a", "an", "one"} else int(relative.group(1))
             unit = relative.group(2)
             multipliers = {
                 "second": timedelta(seconds=amount),
@@ -113,6 +121,8 @@ class RecencyFilter:
                 "day": timedelta(days=amount),
                 "week": timedelta(weeks=amount),
                 "month": timedelta(days=30 * amount),
+                "quarter": timedelta(days=90 * amount),
+                "year": timedelta(days=365 * amount),
             }
             return reference - multipliers[unit]
 

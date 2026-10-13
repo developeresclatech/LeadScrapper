@@ -20,6 +20,7 @@ class PlatformAdapter:
     scrape_many_fn: (
         Callable[[list[str]], dict[str, list[JobLead]]] | None
     ) = None
+    stream_fn: Callable | None = None
 
     def scrape(self, keyword: str) -> list[JobLead]:
         return self.scrape_fn(keyword)

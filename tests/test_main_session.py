@@ -7,6 +7,15 @@ import main
 
 
 class SessionRunnerTests(unittest.TestCase):
+    def test_browsers_close_on_interrupt_during_interval(self):
+        args = main.parse_args(["--runs", "2"])
+        with patch.object(main, "UpworkBrowserSession") as session, \
+             patch.object(main, "LeadEngine") as engine, \
+             patch.object(main.time, "sleep", side_effect=KeyboardInterrupt):
+            self.assertEqual(main.run_session(args), 130)
+        engine.return_value.close.assert_called_once()
+        session.return_value.close.assert_called_once()
+
     def test_session_defaults_to_ten_runs_and_thirty_seconds(self) -> None:
         args = main.parse_args([])
 
@@ -22,7 +31,7 @@ class SessionRunnerTests(unittest.TestCase):
         closed: list[bool] = []
 
         class EngineFake:
-            def __init__(self, config) -> None:
+            def __init__(self, config, *, upwork_session=None) -> None:
                 force_values.append(config.force_catch_up)
 
             def run(self) -> list:

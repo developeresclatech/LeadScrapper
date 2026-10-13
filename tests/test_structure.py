@@ -513,6 +513,7 @@ class StructuralPipelineTests(unittest.TestCase):
                     JobLead(
                         title=f"{keyword.title()} Developer",
                         platform="Test Platform",
+                        posted_date="1 hour ago",
                         location="United States",
                         description=(
                             "Location: Remote. We need web development services."

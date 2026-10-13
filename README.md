@@ -160,9 +160,15 @@ docker compose up --build
 While the scraper is running, open
 [`http://localhost:7900/vnc.html`](http://localhost:7900/vnc.html) to view and
 interact with Chromium inside Docker. The port is bound to localhost only.
-Docker keeps a separate Chrome profile for each browser worker in the named
-`browser_profiles` volume, so Upwork login and verification state survives
-container replacement without concurrent workers locking the same profile.
+Upwork uses at least two keyword workers with separate persistent Chrome
+profiles in the named `browser_profiles` volume: `/app/browser-profiles/upwork`
+and `/app/browser-profiles/upwork-worker-2`. Each worker reuses its own login
+between runs, allowing parallel searches without profile conflicts.
+During a multi-cycle CLI session, these two browser workers stay alive through
+the interval between runs. Each browser is always controlled by its owning
+thread. Browsers close at session shutdown; the next application launch reuses
+their saved profile directories. Run limits and per-run duplicate tracking are
+refreshed each cycle without replacing the browsers.
 
 If Upwork displays a Cloudflare verification page, complete it in the browser
 view within the configured `UPWORK_VERIFICATION_TIMEOUT` (180 seconds by
@@ -175,7 +181,46 @@ The same verification timeout applies after password submission for login/2FA
 (at least the login timeout). If login times out, the next keyword waits in
 that worker's browser for the remaining login cooldown (300 seconds by default).
 Completing sign-in during this wait resumes that keyword without submitting
-credentials again. Each browser worker needs its own authenticated session.
+credentials again.
+
+Local runs save the Upwork Chrome profile in `browser-profiles/upwork` under
+the project directory. Complete login once in the scraper's browser and close
+the scraper normally; subsequent runs reuse its cookies and saved session.
+Upwork may still require verification when a session expires.
+
+Use these defaults in `.env` for a persistent automation profile:
+
+```dotenv
+UPWORK_CHROME_USER_DATA_DIR=
+UPWORK_CHROME_PROFILE_DIRECTORY=Default
+UPWORK_MANUAL_LOGIN=true
+```
+
+Chrome 136+ blocks remote debugging of its normal User Data directory, so
+selecting a personal profile there can open a window without allowing Selenium
+to connect or navigate. Sign into the desired Upwork account once in the
+dedicated scraper browser instead. A custom automation profile root can be set
+with `UPWORK_CHROME_USER_DATA_DIR`; the selected profile subfolder is controlled
+by `UPWORK_CHROME_PROFILE_DIRECTORY`. Run only one scraper instance using it.
+Docker uses its own profile volume; a Windows Chrome profile cannot be reused
+inside Docker.
+
+With `UPWORK_MANUAL_LOGIN=true`, sign in manually in each scraper browser.
+The scraper recognizes both `/nx/find-work/` and `/nx/s/find-work/` dashboards
+using authenticated page content. It leaves login/verification pages open and
+never fills credentials. Each wait uses `UPWORK_VERIFICATION_TIMEOUT`; if it
+expires, the current keyword reports an error and subsequent work checks the
+same browser again. Automatic browser restarts are suppressed while manual
+login is pending. Keep the multi-cycle session running while completing login;
+normal session shutdown still closes its browsers. Set the option to `false`
+to use the automated credential flow.
+
+The second worker uses `browser-profiles/upwork-worker-2` locally (or a sibling
+directory ending in `-worker-2` when a custom root is configured). Sign in once
+in each worker's browser. The first worker retains the existing scraper profile;
+the second maintains its own session. Credentials are not resubmitted when a
+saved session is authenticated. Keep `max_browser_workers` at least 2 for
+concurrent browser tasks; the global browser limit also covers other platforms.
 
 The SQLite database uses the Docker-managed `scraper_data` volume because
 SQLite WAL files are unreliable on Docker Desktop's Windows bind mounts.
@@ -296,7 +341,7 @@ The main structural settings are in `ScraperConfig`:
 |---|---:|---|
 | `max_platform_workers` | `4` | Maximum platform workers running concurrently |
 | `max_browser_workers` | `2` | Maximum browser-capable searches running concurrently |
-| `upwork_keyword_workers` | `2` | Isolated Selenium keyword/browser workers |
+| `upwork_keyword_workers` | `2` | At least two Selenium workers, each with a persistent profile |
 | `http_keyword_workers` | `3` | Keyword workers for Freelancer and Guru |
 | `event_queue_size` | `100` | Maximum keyword-result batches awaiting processing |
 | `output_queue_size` | `500` | Qualified leads awaiting the output worker |
@@ -331,9 +376,13 @@ than 14 hours.” The high result/page limits are safety ceilings: paginated
 scrapers stop earlier when a newest-first page reaches the lookback boundary
 or the platform has no more results.
 
-Normal runs reject missing or unparseable posting dates so an unknown-age job
-cannot bypass the 2-hour limit. Catch-up runs retain their existing behavior
-of keeping unknown posting dates when a platform does not expose a usable age.
+All engine runs reject missing or unparseable posting dates, including catch-up
+runs. Export qualification enforces a maximum age of 24 hours, or the run's
+shorter configured window (normally 14 or 2 hours). Date-only values use strict
+timestamp comparison rather than allowing the entire cutoff calendar day.
+Upwork labels such as `last week`, `last month`, and `last quarter` are recognized
+as old even when followed by proposal counts. Previously exported rows are not
+automatically removed from Google Sheets.
 
 Platform mapping:
 
@@ -344,9 +393,8 @@ Platform mapping:
 
 Upwork, Vollna, Bark, and dated Guru records can be filtered using their
 posting timestamps. Freelancer exposes a bid deadline such as `6 days left`,
-not a reliable posting timestamp. Unparseable timestamps are retained from
-newest-first results by default (`keep_unknown_posted_dates=True`) rather than
-being incorrectly classified as old.
+not a reliable posting timestamp. A deadline alone does not establish recency;
+records without a parseable posting date are excluded from engine exports.
 
 To disable adaptive mode:
 
@@ -467,3 +515,27 @@ python test_qualification.py
 ```
 
 The structural tests do not call external platforms or Google Sheets.
+
+### Streaming and durable upload recovery
+
+The Selenium adapter checkpoints search results in SQLite before detail checks.
+It rejects old/unknown posting dates (at most 24 hours, or the shorter run-policy
+window) and repeated job identities before checking attachments. Each completed
+lead is processed immediately, committed locally, then queued for Sheets. The
+configured Sheets batch size still applies; attachment checks remain enabled.
+Detail failures preserve the search data and leave unsuccessful attachment
+checks as `Not checked`, rather than reporting that no attachments exist.
+
+New processed records enter a durable upload outbox. Pending records are replayed
+on later runs in a background output worker; original collection timestamps are
+preserved. Historical records created before this outbox was introduced are not
+automatically backfilled because they may use older eligibility rules. Raw search
+checkpoints are retained for inspection; they are not automatically re-enriched
+after a crash. Pending Sheets uploads are separate from these raw checkpoints.
+
+Deduplication uses Upwork job IDs extracted from URLs, canonical URLs for other
+sources, then explicit IDs/title fallbacks. Sheets deduplication is within each
+destination tab, not a guarantee of uniqueness across every historical tab.
+Run only one scraper process against a destination spreadsheet at a time.
+Network/TLS errors can still delay delivery; SQLite protects committed records,
+but does not guarantee that every website result was collected.
