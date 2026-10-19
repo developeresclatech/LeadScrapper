@@ -18,6 +18,7 @@ class EarlyDeliveryTests(unittest.TestCase):
         cards = [JobLead(title=str(i), url=f"https://upwork.com/jobs/~{i}",
                          posted_date="1 minute ago") for i in range(2)]
         scraper._load_jobs = Mock(return_value=cards)
+        scraper._snapshot_cards = lambda _, cards: cards
         def parse(card, keyword):
             events.append("parse" + card.title)
             return card

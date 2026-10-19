@@ -146,6 +146,7 @@ class UpworkPaginationTests(unittest.TestCase):
             ]
 
         scraper._load_jobs = load_jobs
+        scraper._snapshot_cards = lambda _, cards: cards
         scraper._parse_card = lambda card, _: card
 
         leads = scraper._scrape_keyword("web development")
@@ -210,6 +211,7 @@ class UpworkPaginationTests(unittest.TestCase):
             return [card]
 
         scraper._load_jobs = load_jobs
+        scraper._snapshot_cards = lambda _, cards: cards
         scraper._parse_card = lambda value, _: value
 
         leads = scraper._scrape_keyword("web development")
@@ -217,8 +219,11 @@ class UpworkPaginationTests(unittest.TestCase):
         self.assertEqual(calls[0], 4)
         self.assertEqual(len(leads), 1)
 
-    def test_restarts_browser_once_after_local_driver_timeout(self) -> None:
+    def test_retries_same_browser_once_after_local_driver_timeout(self) -> None:
         scraper = UpworkSeleniumScraper(ScraperConfig())
+        browser = object()
+        scraper._driver = browser
+        scraper._authenticated = True
         calls = [0]
         resets = [0]
 
@@ -241,7 +246,9 @@ class UpworkPaginationTests(unittest.TestCase):
 
         self.assertEqual(len(leads), 1)
         self.assertEqual(calls[0], 2)
-        self.assertEqual(resets[0], 1)
+        self.assertEqual(resets[0], 0)
+        self.assertIs(scraper._driver, browser)
+        self.assertTrue(scraper._authenticated)
 
 
 if __name__ == "__main__":

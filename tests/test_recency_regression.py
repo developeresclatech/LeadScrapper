@@ -31,7 +31,7 @@ class RecencyRegressionTests(unittest.TestCase):
 
     def test_posted_label_does_not_include_proposal_counts(self):
         card = SimpleNamespace(text="UI Designer\nPosted last month·Proposals: Fewer than 5\nDescription")
-        self.assertEqual(UpworkSeleniumScraper._extract_posted_str(card), "last month")
+        self.assertEqual(UpworkSeleniumScraper._extract_posted_str(card.text), "last month")
 
     def test_engine_enforces_ceiling_and_rejects_unknown_during_catchup(self):
         engine = LeadEngine.__new__(LeadEngine)

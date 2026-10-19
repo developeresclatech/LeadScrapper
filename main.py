@@ -114,8 +114,8 @@ examples:
         help="Wait between completed runs (default: 5)",
     )
     p.add_argument(
-        "--recent-minutes", type=float, default=10,
-        help="Only collect leads posted within this many minutes (default: 10; 0 restores daily catch-up policy)",
+        "--recent-minutes", type=float, default=60,
+        help="Only collect leads posted within this many minutes (default: 60; 0 restores daily catch-up policy)",
     )
     p.add_argument(
         "-v", "--verbose",

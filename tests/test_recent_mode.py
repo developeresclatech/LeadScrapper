@@ -25,7 +25,7 @@ class RecentModeTests(unittest.TestCase):
         self.assertEqual(config.sheets_batch_size, 1)
         for number in (1, 5):
             policy = DailyRunPolicy.from_config(config, number, 72)
-            self.assertEqual(policy.recency_hours, 10 / 60)
+            self.assertEqual(policy.recency_hours, 1)
             self.assertEqual(policy.page_limit, 1)
             self.assertFalse(policy.is_catch_up)
         config = main.build_config(main.parse_args(["--recent-minutes", "5"]))

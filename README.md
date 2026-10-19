@@ -136,17 +136,19 @@ upwork_scraper/
 
 ## Installation
 
-CLI runs default to a 10-minute freshness window, one search page per keyword,
+CLI runs default to a 60-minute freshness window, one search page per keyword,
 six keywords (web development, mobile app development, marketing, SEO,
 Shopify, and WordPress), a five-second pause between completed runs,
 and immediate Sheets uploads (one lead per batch). Windows over two hours use
 up to 150 jobs and three pages per keyword; `--results` overrides the job cap.
-Use `--recent-minutes 10`
-for a ten-minute window or `--recent-minutes 0` for the older daily catch-up
+Use `--recent-minutes 60`
+for a one-hour window or `--recent-minutes 0` for the older daily catch-up
 policy. `--catch-up` explicitly enables the 14-hour window for the first run.
 Recent mode skips attachment detail visits, leaving their status `Not checked`.
 Upwork streams parsed cards before the remaining country searches finish;
 Freelancer streams each completed metadata result and Guru streams each page.
+Upwork reads all rendered card fields in one browser call per page. Logs report
+page load, card parsing, and total keyword times separately.
 Short-window CLI runs skip extra scrolling to start processing visible cards sooner.
 Expired pending uploads are retired while their local lead records are retained.
 Vollna and direct Upwork country checks reuse the session's two Upwork browsers
@@ -199,6 +201,10 @@ the interval between runs. Each browser is always controlled by its owning
 thread. Browsers close at session shutdown; the next application launch reuses
 their saved profile directories. Run limits and per-run duplicate tracking are
 refreshed each cycle without replacing the browsers.
+Search and location lookup errors preserve established browser windows. A search
+can retry once in the same session. If an existing browser cannot be reached,
+the worker reports an error without closing it or opening a replacement; stop
+and restart the scraper to replace a disconnected or manually closed browser.
 
 If Upwork displays a Cloudflare verification page, complete it in the browser
 view within the configured `UPWORK_VERIFICATION_TIMEOUT` (180 seconds by

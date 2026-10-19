@@ -75,12 +75,17 @@ class UpworkSeleniumScraper:
     # ==================================================================
 
     def search_keyword(self, keyword: str, *, on_lead=None, prepare_leads=None) -> list[JobLead]:
+        started = time.monotonic()
         self._search_emit = on_lead if self.config.recent_minutes is not None else None
         self._search_prepare = prepare_leads
         self._search_emitted = set()
         try:
             return self._search_keyword(keyword, on_lead=on_lead, prepare_leads=prepare_leads)
         finally:
+            logger.info(
+                "Upwork worker %d: keyword '%s' finished in %.2fs.",
+                self._profile_worker + 1, keyword, time.monotonic() - started,
+            )
             self._search_emit = None
             self._search_prepare = None
             self._search_emitted = set()
@@ -95,12 +100,11 @@ class UpworkSeleniumScraper:
                     raise
                 if attempt == 0 and not self._manual_login_pending and self._is_browser_failure(exc):
                     logger.warning(
-                        "Upwork browser failed for '%s'; restarting its "
-                        "isolated browser and retrying once: %s",
+                        "Upwork search failed for '%s'; keeping its browser "
+                        "open and retrying once in the same session: %s",
                         keyword,
                         exc,
                     )
-                    self._discard_driver()
                     continue
                 raise
         remaining = [lead for lead in leads if lead.url not in self._search_emitted]
@@ -164,14 +168,12 @@ class UpworkSeleniumScraper:
             except Exception as exc:
                 if self._is_browser_failure(exc):
                     logger.warning(
-                        "Upwork location browser failed for %s: %s",
+                        "Upwork location lookup failed for %s; keeping its "
+                        "browser open: %s",
                         lead.url,
                         str(exc).splitlines()[0],
                     )
-                    self._discard_driver()
-                    driver = None
-                    # Stop this batch instead of relaunching for every URL.
-                    self._browser_retry_at = time.monotonic() + 300
+                    # Leave the established browser available for the next keyword.
                     break
                 else:
                     logger.debug(
@@ -309,14 +311,17 @@ class UpworkSeleniumScraper:
             try:
                 self._driver.current_url
                 return self._driver
-            except Exception:
+            except Exception as exc:
                 if self._manual_login_pending:
                     raise RuntimeError(
                         "Manual-login browser is disconnected. Automatic restart is paused; "
                         "stop the scraper and restart it when ready."
-                    ) from None
-                logger.info("Browser session lost, recreating...")
-                self._discard_driver()
+                    ) from exc
+                raise RuntimeError(
+                    f"Upwork browser worker {self._profile_worker + 1} could not be reached. "
+                    "Its browser is preserved and no replacement will be opened. "
+                    "Check the existing Chrome window or stop and restart the scraper."
+                ) from exc
         logger.info("Launching Chrome via undetected_chromedriver...")
         with _DRIVER_LAUNCH_LOCK:
             options = uc.ChromeOptions()
@@ -758,23 +763,27 @@ class UpworkSeleniumScraper:
                 page,
                 feed_url,
             )
+            load_started = time.monotonic()
             cards = self._load_jobs(
                 driver,
                 feed_url,
                 max_scrolls=self.config.selenium_max_scrolls,
             )
+            load_seconds = time.monotonic() - load_started
             logger.info(
-                "Loaded %d job cards from page %d for '%s'",
+                "Loaded %d job cards from page %d for '%s' in %.2fs",
                 len(cards),
                 page,
                 keyword,
+                load_seconds,
             )
             if not cards:
                 break
 
             parsed_page: list[JobLead] = []
             streamed = 0
-            for card in cards:
+            parse_started = time.monotonic()
+            for card in self._snapshot_cards(driver, cards):
                 try:
                     job = self._parse_card(card, keyword)
                     if job:
@@ -793,6 +802,12 @@ class UpworkSeleniumScraper:
                                 streamed += 1
                 except WebDriverException:
                     continue
+
+            logger.info(
+                "Upwork worker %d: '%s' %s page %d parsed %d cards in %.2fs.",
+                self._profile_worker + 1, keyword, client_location or "all locations",
+                page, len(parsed_page), time.monotonic() - parse_started,
+            )
 
             page_signature = tuple(job.url or job.title for job in parsed_page)
             if page_signature and page_signature == previous_page_signature:
@@ -922,26 +937,69 @@ class UpworkSeleniumScraper:
     # Card Parsing
     # ==================================================================
 
+    @staticmethod
+    def _snapshot_cards(driver, cards) -> list[dict]:
+        # Read the rendered fields in one browser call instead of per-element RPCs.
+        return driver.execute_script("""
+            const [cards, linkSelectors] = arguments;
+            const firstText = (root, selectors) => {
+                for (const selector of selectors) {
+                    for (const node of root.querySelectorAll(selector)) {
+                        const text = (node.innerText || '').trim();
+                        if (text) return text;
+                    }
+                }
+                return '';
+            };
+            return cards.map(card => {
+                let title = '', url = '';
+                for (const selector of linkSelectors) {
+                    const link = Array.from(card.querySelectorAll(selector))
+                        .find(node => node.href && node.href.includes('/jobs/'));
+                    if (link) {
+                        title = (link.innerText || '').trim();
+                        url = link.href.split('?')[0];
+                        break;
+                    }
+                }
+                const skills = [];
+                for (const selector of [
+                    "[data-test='TokenClamp JobAttrs'] button",
+                    "[data-test='skills-list'] a",
+                    "a[href*='ontology_skill_uid']",
+                ]) {
+                    for (const node of card.querySelectorAll(selector)) {
+                        const text = (node.innerText || '').trim();
+                        if (text && !skills.includes(text)) skills.push(text);
+                    }
+                }
+                return {
+                    title, url, text: card.innerText || '', skills,
+                    description: firstText(card, [
+                        "[data-test='UpCLineClamp JobDescription']",
+                        "[data-test='job-description-text']", "p",
+                    ]),
+                    location: firstText(card, [
+                        "[data-test='client-country']",
+                        "[data-test='client-location']",
+                        "[data-test='location']",
+                        "[data-qa='client-location']",
+                    ]),
+                };
+            });
+        """, cards, JOB_LINK_SELECTORS)
+
     def _parse_card(self, card, keyword: str) -> Optional[JobLead]:
-        title, url = self._first_link(card)
+        title, url = card["title"], card["url"]
         if not title or not url:
             return None
 
-        raw_text = card.text
-        desc = self._first_text(card, [
-            "[data-test='UpCLineClamp JobDescription']",
-            "[data-test='job-description-text']",
-            "p",
-        ])
-        posted = self._extract_posted_str(card)
-        skills = self._extract_skills(card)
+        raw_text = card["text"]
+        desc = card["description"]
+        posted = self._extract_posted_str(raw_text)
+        skills = card["skills"]
         budget, job_type, exp_level = self._extract_job_meta(raw_text)
-        client_location = self._first_text(card, [
-            "[data-test='client-country']",
-            "[data-test='client-location']",
-            "[data-test='location']",
-            "[data-qa='client-location']",
-        ])
+        client_location = card["location"]
 
         return JobLead(
             title=title,
@@ -958,17 +1016,6 @@ class UpworkSeleniumScraper:
             country=client_location,
         )
 
-    def _first_link(self, card):
-        for selector in JOB_LINK_SELECTORS:
-            links = card.find_elements(By.CSS_SELECTOR, selector)
-            for link in links:
-                href = link.get_attribute("href")
-                text = link.text.strip()
-                if href and "/jobs/" in href:
-                    clean_url = href.split("?")[0]
-                    return text, clean_url
-        return "", ""
-
     @staticmethod
     def _first_text(card, selectors):
         for selector in selectors:
@@ -980,22 +1027,7 @@ class UpworkSeleniumScraper:
         return ""
 
     @staticmethod
-    def _extract_skills(card):
-        skills = []
-        for selector in [
-            "[data-test='TokenClamp JobAttrs'] button",
-            "[data-test='skills-list'] a",
-            "a[href*='ontology_skill_uid']",
-        ]:
-            for el in card.find_elements(By.CSS_SELECTOR, selector):
-                text = el.text.strip()
-                if text and text not in skills:
-                    skills.append(text)
-        return skills
-
-    @staticmethod
-    def _extract_posted_str(card):
-        text = card.text
+    def _extract_posted_str(text: str):
         patterns = [
             r"Posted\s+([^\n]+)",
             r"(\d+\s+(?:minute|hour|day|week)s?\s+ago)",
