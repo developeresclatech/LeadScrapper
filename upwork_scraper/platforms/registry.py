@@ -56,7 +56,10 @@ def build_platform_adapters(config: ScraperConfig, upwork_session=None) -> dict[
             "upwork",
             scraper.search_keyword,
             scraper.close,
-            resource_group="browser",
+            resource_group=(
+                "http" if config.recent_minutes is not None
+                and "upwork_selenium" in resolved_platforms else "browser"
+            ),
         )
 
     if "upwork_selenium" in resolved_platforms:
@@ -79,8 +82,10 @@ def build_platform_adapters(config: ScraperConfig, upwork_session=None) -> dict[
             "vollna",
             scraper.search_keyword,
             scraper.close,
-            resource_group="browser",
+            resource_group=("http" if config.recent_minutes is not None
+                            and "upwork_selenium" in resolved_platforms else "browser"),
             scrape_many_fn=scraper.search_keywords,
+            stream_many_fn=scraper.search_keywords,
         )
 
     if "freelancer" in resolved_platforms:
@@ -97,6 +102,10 @@ def build_platform_adapters(config: ScraperConfig, upwork_session=None) -> dict[
             ),
             pool.close,
             keyword_workers=config.http_keyword_workers,
+            stream_fn=lambda keyword, worker_pool=pool, **callbacks: worker_pool.get().scrape(
+                keyword, config.max_results_per_keyword, config.page_limit,
+                config.collection_recency_hours, **callbacks,
+            ),
         )
 
     if "guru" in resolved_platforms:
@@ -113,6 +122,10 @@ def build_platform_adapters(config: ScraperConfig, upwork_session=None) -> dict[
             ),
             pool.close,
             keyword_workers=config.http_keyword_workers,
+            stream_fn=lambda keyword, worker_pool=pool, **callbacks: worker_pool.get().scrape(
+                keyword, config.max_results_per_keyword, config.page_limit,
+                config.collection_recency_hours, **callbacks,
+            ),
         )
 
     # Bark is temporarily disabled. Keep this registration block intact so it
@@ -126,5 +139,15 @@ def build_platform_adapters(config: ScraperConfig, upwork_session=None) -> dict[
     #         scraper.close,
     #         resource_group="browser",
     #     )
+
+    if "upwork_selenium" in resolved_platforms:
+        # Country resolution uses the same two owning threads and profiles.
+        if "vollna" in adapters:
+            vollna = adapters["vollna"].scrape_many_fn.__self__
+            vollna._location_resolver = session
+            vollna._owns_location_resolver = False
+        if "upwork" in adapters:
+            direct = adapters["upwork"].scrape_fn.__self__
+            direct._shared_location_resolver = session
 
     return adapters

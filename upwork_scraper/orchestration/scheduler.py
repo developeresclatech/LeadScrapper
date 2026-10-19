@@ -96,14 +96,25 @@ class PlatformScheduler:
             try:
                 if adapter.scrape_many_fn is not None:
                     try:
+                        qualified = {keyword: 0 for keyword in self.keywords}
+                        streaming = adapter.stream_many_fn is not None and self.process_leads is not None
+
+                        def emit(keyword, lead):
+                            qualified[keyword] += self.process_leads(adapter.name, keyword, [lead])
+
+                        def collect_many():
+                            if streaming:
+                                return adapter.stream_many_fn(self.keywords, on_lead=emit)
+                            return adapter.scrape_many(self.keywords)
+
                         if adapter.resource_group == "browser":
                             with browser_slots:
-                                results = adapter.scrape_many(self.keywords)
+                                results = collect_many()
                         else:
-                            results = adapter.scrape_many(self.keywords)
+                            results = collect_many()
                         for keyword in self.keywords:
                             leads = results.get(keyword, [])
-                            qualified_count = (
+                            qualified_count = qualified[keyword] if streaming else (
                                 self.process_leads(
                                     adapter.name,
                                     keyword,

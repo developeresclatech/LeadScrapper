@@ -26,7 +26,7 @@ class ScraperConfig:
         "Search Engine Optimization",
         "Social Media Marketing",
         "CMS development",
-        "AI Automation", 
+        "AI Automation",
         "SaaS Development",
         "IT Solution provider",
         "ui design",
@@ -295,6 +295,7 @@ class ScraperConfig:
     normal_keep_unknown_posted_dates: bool = False
     # Runtime value set by LeadEngine for age-aware platform pagination.
     collection_recency_hours: float | None = None
+    recent_minutes: float | None = None
     local_timezone: str = os.getenv("SCRAPER_TIMEZONE", "Asia/Karachi")
 
     # TLS fingerprint

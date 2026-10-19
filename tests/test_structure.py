@@ -493,8 +493,8 @@ class StructuralPipelineTests(unittest.TestCase):
             display_timezone=resolve_timezone("Asia/Karachi"),
         )
 
-        self.assertEqual(row["Lead Found At"], "2026-07-29 3:00 PM")
-        self.assertEqual(row["Sheet Saved At"], "2026-07-29 3:00 PM")
+        self.assertEqual(row["Lead Found At"], "2026-07-29 3:00:00 PM")
+        self.assertEqual(row["Sheet Saved At"], "2026-07-29 3:00:12 PM")
         self.assertEqual(row["Found-to-Sheet Seconds"], "12.50")
 
     def test_engine_processes_keyword_results_without_network(self) -> None:

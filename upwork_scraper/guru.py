@@ -6,10 +6,10 @@ import re
 from datetime import datetime
 from urllib.parse import urljoin
 
-from curl_cffi import requests as cffi_requests
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from .models import JobLead
+from .http_transport import create_scraper_session
 from .pipeline.location_filter import LocationFilter
 from .pipeline.recency_filter import RecencyFilter
 
@@ -37,7 +37,7 @@ class GuruScraper:
         self,
         target_locations: list[str] | None = None,
     ) -> None:
-        self._session = cffi_requests.Session(impersonate="chrome")
+        self._session = create_scraper_session()
         self._target_locations = (
             ["United States", "Canada"]
             if target_locations is None
@@ -59,7 +59,7 @@ class GuruScraper:
         meta: str,
         now: datetime | None = None,
     ) -> str:
-        """Return Guru posting metadata as an absolute calendar date."""
+        """Preserve the posting time; keep date-only labels date-only."""
         match = re.search(
             r"\bPosted\s+(?:on\s+)?(.+?)(?:\s*[\u00b7]|$)",
             meta,
@@ -76,7 +76,11 @@ class GuruScraper:
         value = re.sub(r"\bmins?\b", "minutes", value, flags=re.IGNORECASE)
         value = re.sub(r"\bsecs?\b", "seconds", value, flags=re.IGNORECASE)
         posted_at = RecencyFilter.parse_posted_at(value, now)
-        return posted_at.strftime("%b %d, %Y") if posted_at else ""
+        if not posted_at:
+            return ""
+        if RecencyFilter._is_date_only(value):
+            return posted_at.strftime("%b %d, %Y")
+        return posted_at.isoformat()
 
     def _parse_records(self, html: str) -> list[JobLead]:
         tree = HTMLParser(html)
@@ -92,7 +96,7 @@ class GuruScraper:
             budget = budget_el.text(strip=True) if budget_el else ""
 
             meta_el = rec.css_first(".jobRecord__meta")
-            meta = meta_el.text(strip=True) if meta_el else ""
+            meta = meta_el.text(separator=" ", strip=True) if meta_el else ""
 
             body_el = rec.css_first(".jobRecord__body")
             description = body_el.text(strip=True)[:300] if body_el else ""
@@ -156,17 +160,20 @@ class GuruScraper:
         max_results: int = 25,
         page_limit: int = 1,
         recency_hours: float | None = None,
+        *,
+        on_lead=None,
+        prepare_leads=None,
     ) -> list[JobLead]:
         skill = self._pick_skill(keyword)
         url = f"{BASE_URL}/d/jobs/skill/{skill}/"
         leads: list[JobLead] = []
         seen: set[str] = set()
         for page in range(1, max(1, page_limit) + 1):
-            logger.info("Guru: fetching %s (page %d)", url, page)
+            page_url = url if page == 1 else f"{url}pg/{page}/"
+            logger.info("Guru: fetching %s (page %d)", page_url, page)
             try:
                 resp = self._session.get(
-                    url,
-                    params={"page": page},
+                    page_url,
                     timeout=30,
                     headers={
                         "Accept": "text/html",
@@ -184,18 +191,23 @@ class GuruScraper:
 
             page_leads = self._parse_records(resp.text)
             target_page_leads = self._target_leads(page_leads)
+            logger.info(
+                "Guru page %d: %d found, %d target-country, %d missing posting dates",
+                page, len(page_leads), len(target_page_leads),
+                sum(not lead.posted_date for lead in page_leads),
+            )
             for lead in target_page_leads:
                 key = lead.url or lead.title
                 if key not in seen:
                     seen.add(key)
                     leads.append(lead)
+                    if on_lead is not None:
+                        on_lead(lead)
             if (
                 len(leads) >= max_results
                 or not page_leads
-                or RecencyFilter.page_reaches_boundary(
-                    page_leads,
-                    recency_hours,
-                )
+                or all(RecencyFilter.page_reaches_boundary([lead], recency_hours)
+                       for lead in page_leads)
             ):
                 break
 

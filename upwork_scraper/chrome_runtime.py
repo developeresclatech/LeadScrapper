@@ -19,6 +19,33 @@ logger = logging.getLogger(__name__)
 _VERSION_PATTERN = re.compile(r"\b(\d+)\.\d+(?:\.\d+){0,2}\b")
 
 
+def ensure_profile_available(profile_path: str | None) -> None:
+    """Fail before launching another Chrome into an occupied Windows profile."""
+    if os.name != "nt" or not profile_path:
+        return
+    lockfile = Path(profile_path) / "lockfile"
+    if not lockfile.exists():
+        return
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                  wintypes.DWORD, ctypes.c_void_p,
+                                  wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateFileW(str(lockfile), 0x80000000, 0, None, 3, 128, None)
+    if handle == ctypes.c_void_p(-1).value:
+        error = ctypes.get_last_error()
+        if error in (32, 33):
+            raise RuntimeError(
+                f"Chrome profile is already in use: {profile_path}. "
+                "Close the existing scraper Chrome window and stop duplicate scraper runs."
+            )
+        if error != 2:
+            raise ctypes.WinError(error)
+    else:
+        kernel.CloseHandle(handle)
+
+
 def _major_from_text(value: str) -> int | None:
     match = _VERSION_PATTERN.search(value or "")
     return int(match.group(1)) if match else None

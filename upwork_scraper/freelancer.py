@@ -7,8 +7,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from urllib.parse import urljoin
 
-from curl_cffi import requests as cffi_requests
-from selectolax.parser import HTMLParser
+import requests
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from .models import JobLead
 from .pipeline.location_filter import LocationFilter
@@ -39,7 +39,9 @@ class FreelancerScraper:
         self,
         target_locations: list[str] | None = None,
     ) -> None:
-        self._session = cffi_requests.Session(impersonate="chrome")
+        # Keep concurrent Freelancer requests off the native curl backend,
+        # which can terminate the entire process on Windows.
+        self._session = requests.Session()
         self._target_locations = (
             ["United States", "Canada"]
             if target_locations is None
@@ -52,10 +54,22 @@ class FreelancerScraper:
 
     def _pick_category(self, keyword: str) -> str:
         kw = keyword.lower().strip()
+        aliases = {
+            "search engine optimization": "seo",
+            "cms development": "cms",
+            "ai automation": "automation",
+            "saas development": "saas",
+            "it solution provider": "software-development",
+            "ui design": "user-interface-ia",
+            "web design": "website-design",
+            "website": "website-design",
+        }
+        if kw in aliases:
+            return f"/jobs/{aliases[kw]}/"
         if kw in FREELANCER_CATEGORIES:
-            return FREELANCER_CATEGORIES[kw]
+            return FREELANCER_CATEGORIES[kw].replace("/job-search/", "/jobs/")
         slug = re.sub(r"[^a-z0-9]+", "-", kw).strip("-")
-        return f"/job-search/{slug}/"
+        return f"/jobs/{slug}/"
 
     def _parse_cards(self, html: str, source_url: str) -> list[JobLead]:
         tree = HTMLParser(html)
@@ -80,7 +94,7 @@ class FreelancerScraper:
             description = desc_el.text(strip=True)[:500] if desc_el else ""
 
             skills_els = card.css(
-                ".JobSearchCard-primary-skills a, [class*=skill] a"
+                ".JobSearchCard-primary-tagsLink, .JobSearchCard-primary-skills a, [class*=skill] a"
             )
             skills = [s.text(strip=True) for s in skills_els if s.text(strip=True)]
 
@@ -177,9 +191,8 @@ class FreelancerScraper:
         if not job_url:
             return "", ""
         try:
-            response = cffi_requests.get(
+            response = requests.get(
                 job_url,
-                impersonate="chrome",
                 timeout=30,
                 headers={
                     "Accept": "text/html",
@@ -210,7 +223,7 @@ class FreelancerScraper:
         """Backward-compatible posting-date-only detail helper."""
         return cls._fetch_detail_metadata(job_url)[0]
 
-    def _populate_posted_dates(self, leads: list[JobLead]) -> None:
+    def _populate_posted_dates(self, leads: list[JobLead], on_lead=None) -> None:
         """Fetch detail dates concurrently without changing result order."""
         if not leads:
             return
@@ -229,6 +242,8 @@ class FreelancerScraper:
                 lead.posted_date = posted_date
                 lead.location = client_country
                 lead.country = client_country
+                if on_lead is not None and self._target_leads([lead]):
+                    on_lead(lead)
 
     def _target_leads(self, leads: list[JobLead]) -> list[JobLead]:
         if not self._target_locations:
@@ -245,17 +260,21 @@ class FreelancerScraper:
         max_results: int = 25,
         page_limit: int = 1,
         recency_hours: float | None = None,
+        *,
+        on_lead=None,
+        prepare_leads=None,
     ) -> list[JobLead]:
         cat = self._pick_category(keyword)
         url = f"{BASE_URL}{cat}"
         leads: list[JobLead] = []
         seen: set[str] = set()
         for page in range(1, max(1, page_limit) + 1):
-            logger.info("Freelancer: fetching %s (page %d)", url, page)
+            page_url = url if page == 1 else f"{url}{page}/"
+            logger.info("Freelancer: fetching %s (page %d)", page_url, page)
             try:
                 resp = self._session.get(
-                    url,
-                    params={"sort": "latest", "page": page},
+                    page_url,
+                    params={"sort": "newest"},
                     timeout=30,
                     headers={
                         "Accept": "text/html",
@@ -278,16 +297,24 @@ class FreelancerScraper:
                     new_page_leads.append(lead)
                     if len(leads) + len(new_page_leads) >= max_results:
                         break
-            self._populate_posted_dates(new_page_leads)
+            if on_lead is None:
+                self._populate_posted_dates(new_page_leads)
+            else:
+                self._populate_posted_dates(new_page_leads, on_lead=on_lead)
             target_page_leads = self._target_leads(new_page_leads)
+            logger.info(
+                "Freelancer page %d: %d found, %d target-country, %d missing posting dates",
+                page, len(new_page_leads), len(target_page_leads),
+                sum(not lead.posted_date for lead in new_page_leads),
+            )
             leads.extend(target_page_leads)
             if (
                 len(leads) >= max_results
                 or not page_leads
-                or RecencyFilter.page_reaches_boundary(
-                    new_page_leads,
-                    recency_hours,
-                )
+                or (new_page_leads and all(
+                    RecencyFilter.page_reaches_boundary([lead], recency_hours)
+                    for lead in new_page_leads
+                ))
             ):
                 break
 

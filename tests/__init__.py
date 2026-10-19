@@ -7,7 +7,7 @@ import json
 from upwork_scraper.models import JobLead
 from upwork_scraper.scraper import UpworkScraper
 from upwork_scraper.config import ScraperConfig
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 
 # ── Realistic Upwork job page HTML (captured from live site) ──────────────

@@ -26,6 +26,18 @@ class DailyRunPolicy:
         run_number: int,
         hours_since_last_completed: float | None = None,
     ) -> "DailyRunPolicy":
+        if config.recent_minutes is not None:
+            wider_window = config.recent_minutes > 120
+            return cls(
+                run_number=run_number,
+                max_results_per_keyword=(
+                    (config.catch_up_max_results_per_keyword
+                     if config.adaptive_daily_limits else config.max_results_per_keyword)
+                    if wider_window else min(50, config.max_results_per_keyword)
+                ),
+                page_limit=config.catch_up_max_pages if wider_window else 1,
+                recency_hours=config.recent_minutes / 60,
+            )
         if not config.adaptive_daily_limits:
             return cls(
                 run_number=run_number,

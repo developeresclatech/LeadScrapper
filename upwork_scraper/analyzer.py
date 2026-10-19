@@ -150,7 +150,7 @@ SERVICE_KEYWORDS = [
     "marketplace", "booking system", "portal", "membership",
     "cms", "headless", "strapi", "contentful",
     "stripe", "payment", "paypal", "integration",
-    "automation", "zapier", "workflow", "n8n",
+    "automation", "zapier", "workflow", "n8n", "webiste", "custom website", "marketing", "mvp", "crm", "Ghl"
 ]
 
 # ──────────────────────────────────────────────────────────────

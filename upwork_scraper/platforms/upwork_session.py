@@ -57,6 +57,19 @@ class UpworkBrowserSession:
         finally:
             self._available.put(index)
 
+    def enrich_client_locations(self, leads, **options):
+        index = self._available.get()
+        try:
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("Upwork browser session is closed")
+                future = self._executors[index].submit(
+                    self._scrapers[index].enrich_client_locations, leads, **options
+                )
+            return future.result()
+        finally:
+            self._available.put(index)
+
     def close(self):
         with self._lock:
             if self._closed:

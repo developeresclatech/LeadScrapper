@@ -190,6 +190,23 @@ class SQLiteLeadRepository:
             self._connection.commit()
             return f"outbox:{row_id}"
 
+    def expire_pending_uploads(self, dedup_keys: list[str]) -> None:
+        """Remove expired outbox entries without claiming they were uploaded."""
+        with self._lock:
+            for key in dedup_keys:
+                if key.startswith("outbox:"):
+                    self._connection.execute(
+                        "DELETE FROM upload_outbox WHERE lead_id=?",
+                        (int(key.split(":", 1)[1]),),
+                    )
+                else:
+                    self._connection.execute(
+                        "DELETE FROM upload_outbox WHERE lead_id IN "
+                        "(SELECT id FROM processed_leads WHERE run_id=? AND dedup_key=?)",
+                        (self.run_id, key),
+                    )
+            self._connection.commit()
+
     def mark_uploaded(self, dedup_keys: list[str]) -> None:
         if not dedup_keys:
             return

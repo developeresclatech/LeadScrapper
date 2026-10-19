@@ -22,10 +22,12 @@ class RecencyFilter:
         max_age_hours: float | None,
         keep_unknown: bool = True,
         strict_date_only: bool = False,
+        anchor_to_scraped_at: bool = False,
     ) -> None:
         self.max_age_hours = max_age_hours
         self.keep_unknown = keep_unknown
         self.strict_date_only = strict_date_only
+        self.anchor_to_scraped_at = anchor_to_scraped_at
 
     def matches(self, lead: JobLead, now: datetime | None = None) -> bool:
         if self.max_age_hours is None:
@@ -33,7 +35,15 @@ class RecencyFilter:
         reference = now or datetime.now(timezone.utc)
         if reference.tzinfo is None:
             reference = reference.replace(tzinfo=timezone.utc)
-        posted_at = self.parse_posted_at(lead.posted_date, reference)
+        posted_reference = reference
+        if self.anchor_to_scraped_at:
+            try:
+                posted_reference = datetime.fromisoformat(lead.scraped_at.replace("Z", "+00:00"))
+                if posted_reference.tzinfo is None:
+                    posted_reference = posted_reference.replace(tzinfo=timezone.utc)
+            except ValueError:
+                return False
+        posted_at = self.parse_posted_at(lead.posted_date, posted_reference)
         if posted_at is None:
             return self.keep_unknown
         if self._is_date_only(lead.posted_date) and not self.strict_date_only:

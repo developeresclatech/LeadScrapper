@@ -13,10 +13,10 @@ from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests as std_requests
-from curl_cffi import requests as cffi_requests
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 from .config import ScraperConfig
+from .http_transport import create_scraper_session
 from .models import JobLead
 from .pipeline.recency_filter import RecencyFilter
 from .selenium_scraper import UpworkSeleniumScraper
@@ -34,7 +34,7 @@ class UpworkScraper:
     ):
         self.config = config or ScraperConfig()
         self.selenium_fallback = selenium_fallback
-        self._curl = cffi_requests.Session(impersonate=self.config.impersonate_browser)
+        self._curl = create_scraper_session(impersonate=self.config.impersonate_browser)
         self._plain = std_requests.Session()
         self._plain.headers.update({
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -79,7 +79,17 @@ class UpworkScraper:
         leads: list[JobLead],
     ) -> list[JobLead]:
         selected = leads[:self.config.max_results_per_keyword]
+        if self.config.recent_minutes is not None:
+            recency = RecencyFilter(
+                self.config.recent_minutes / 60, keep_unknown=False,
+                strict_date_only=True, anchor_to_scraped_at=True,
+            )
+            selected = [lead for lead in selected if recency.matches(lead)]
         if not selected:
+            return selected
+        shared = getattr(self, "_shared_location_resolver", None)
+        if shared is not None:
+            shared.enrich_client_locations(selected)
             return selected
         if (
             not hasattr(self, "_selenium_scraper")
@@ -423,6 +433,8 @@ class UpworkScraper:
         return leads[:self.config.max_results_per_keyword]
 
     def _fetch_direct(self, url: str, params: dict | None = None) -> Optional[str]:
+        if getattr(self, "_direct_blocked", False):
+            return None
         try:
             resp = self._curl.get(
                 url, params=params,
@@ -431,6 +443,15 @@ class UpworkScraper:
             )
             if resp.status_code == 200:
                 return resp.text
-        except Exception:
-            pass
+            if resp.status_code in (403, 429):
+                self._direct_blocked = True
+                logger.warning(
+                    "Direct Upwork HTTP returned %d; skipping further direct requests "
+                    "this run. Authenticated Selenium collection remains separate.",
+                    resp.status_code,
+                )
+            else:
+                logger.warning("Direct Upwork HTTP returned %d.", resp.status_code)
+        except Exception as exc:
+            logger.warning("Direct Upwork HTTP request failed: %s", exc)
         return None

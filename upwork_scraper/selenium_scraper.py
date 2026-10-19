@@ -24,7 +24,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from .config import ScraperConfig
 from .browser_cleanup import close_chrome_safely, discard_chrome_safely
-from .chrome_runtime import chrome_launch_options
+from .chrome_runtime import chrome_launch_options, ensure_profile_available
 from .models import JobLead
 from .pipeline.recency_filter import RecencyFilter
 
@@ -68,17 +68,31 @@ class UpworkSeleniumScraper:
         self._login_retry_at = 0.0
         self._authenticated = False
         self._manual_login_pending = False
+        self._browser_retry_at = 0.0
 
     # ==================================================================
     # Public API
     # ==================================================================
 
     def search_keyword(self, keyword: str, *, on_lead=None, prepare_leads=None) -> list[JobLead]:
+        self._search_emit = on_lead if self.config.recent_minutes is not None else None
+        self._search_prepare = prepare_leads
+        self._search_emitted = set()
+        try:
+            return self._search_keyword(keyword, on_lead=on_lead, prepare_leads=prepare_leads)
+        finally:
+            self._search_emit = None
+            self._search_prepare = None
+            self._search_emitted = set()
+
+    def _search_keyword(self, keyword: str, *, on_lead=None, prepare_leads=None) -> list[JobLead]:
         for attempt in range(2):
             try:
                 leads = self._scrape_keyword(keyword)
                 break
             except Exception as exc:
+                if time.monotonic() < self._browser_retry_at:
+                    raise
                 if attempt == 0 and not self._manual_login_pending and self._is_browser_failure(exc):
                     logger.warning(
                         "Upwork browser failed for '%s'; restarting its "
@@ -89,12 +103,14 @@ class UpworkSeleniumScraper:
                     self._discard_driver()
                     continue
                 raise
-        candidates = prepare_leads(leads) if prepare_leads else leads
+        remaining = [lead for lead in leads if lead.url not in self._search_emitted]
+        candidates = prepare_leads(remaining) if prepare_leads else remaining
         logger.info("Upwork worker %d: %d searched, %d detail checks; saving each completed lead.",
                     self._profile_worker + 1, len(leads), len(candidates))
         for lead in candidates:
             try:
-                self.enrich_attachments([lead])
+                if self.config.recent_minutes is None:
+                    self.enrich_attachments([lead])
                 self.enrich_client_locations([lead], ensure_logged_in=False)
             except Exception as exc:
                 logger.warning("Detail check incomplete for %s (%s); preserving collected data.",
@@ -154,6 +170,9 @@ class UpworkSeleniumScraper:
                     )
                     self._discard_driver()
                     driver = None
+                    # Stop this batch instead of relaunching for every URL.
+                    self._browser_retry_at = time.monotonic() + 300
+                    break
                 else:
                     logger.debug(
                         "Upwork client location unavailable for %s: %s",
@@ -279,6 +298,13 @@ class UpworkSeleniumScraper:
     # ==================================================================
 
     def _get_driver(self) -> uc.Chrome:
+        remaining = self._browser_retry_at - time.monotonic()
+        if remaining > 0:
+            raise RuntimeError(
+                f"Upwork browser worker {self._profile_worker + 1} is cooling down "
+                f"for {remaining:.0f}s after a browser failure. Close leftover "
+                "scraper Chrome windows before retrying."
+            )
         if self._driver is not None:
             try:
                 self._driver.current_url
@@ -294,6 +320,8 @@ class UpworkSeleniumScraper:
         logger.info("Launching Chrome via undetected_chromedriver...")
         with _DRIVER_LAUNCH_LOCK:
             options = uc.ChromeOptions()
+            if self.config.recent_minutes is not None:
+                options.page_load_strategy = "eager"
             options.add_argument(
                 "--disable-blink-features=AutomationControlled"
             )
@@ -309,7 +337,22 @@ class UpworkSeleniumScraper:
                 options.add_argument("--disable-dev-shm-usage")
             launch_options: dict[str, object] = {"options": options}
             launch_options.update(chrome_launch_options(profile_name="upwork", profile_worker=self._profile_worker))
-            self._driver = uc.Chrome(**launch_options)
+            # Retain the partially initialized instance so a failed constructor
+            # cannot leave its Chrome/ChromeDriver processes holding the profile.
+            driver = uc.Chrome.__new__(uc.Chrome)
+            try:
+                ensure_profile_available(launch_options.get("user_data_dir"))
+                uc.Chrome.__init__(driver, **launch_options)
+            except Exception:
+                discard_chrome_safely(driver)
+                self._browser_retry_at = time.monotonic() + 300
+                logger.error(
+                    "Chrome worker %d launch failed; retry paused for 300s. "
+                    "Check for an existing scraper window using this profile.",
+                    self._profile_worker + 1,
+                )
+                raise
+            self._driver = driver
             logger.info("Chrome automation connected; preparing Upwork navigation.")
         self._driver.set_page_load_timeout(120)
         client_config = getattr(
@@ -350,6 +393,11 @@ class UpworkSeleniumScraper:
                 self._authenticated = True
                 self._login_retry_at = 0.0
                 return True
+            if self.config.recent_minutes is not None:
+                raise RuntimeError(
+                    "Upwork login is cooling down; complete login in its browser. "
+                    "Other searches continue without waiting for the cooldown."
+                )
             remaining = max(1, self._login_retry_at - time.monotonic())
             logger.warning(
                 "Waiting up to %.0fs for manual Upwork login in this worker's "
@@ -367,7 +415,13 @@ class UpworkSeleniumScraper:
             self._login_retry_at = 0.0
             return True
         # Serialize authentication only; searches remain parallel.
-        if not _LOGIN_LOCK.acquire(timeout=self.config.upwork_login_timeout):
+        # A login may include both a challenge and a 2FA wait. Do not lose
+        # another worker's keyword after only 45 seconds while that runs.
+        login_wait = max(
+            self.config.upwork_login_timeout,
+            2 * self.config.upwork_verification_timeout + 2 * self.config.timeout + 15,
+        )
+        if not _LOGIN_LOCK.acquire(timeout=login_wait):
             raise RuntimeError("Another Upwork worker is logging in; login lock wait timed out.")
         try:
             self._authenticated = self._attempt_login(driver)
@@ -719,11 +773,24 @@ class UpworkSeleniumScraper:
                 break
 
             parsed_page: list[JobLead] = []
+            streamed = 0
             for card in cards:
                 try:
                     job = self._parse_card(card, keyword)
                     if job:
                         parsed_page.append(job)
+                        if client_location:
+                            job.location = job.country = client_location
+                        emit = getattr(self, "_search_emit", None)
+                        if (emit and streamed + len(leads) < result_limit
+                                and job.url not in self._seen_ids
+                                and job.url not in self._search_emitted):
+                            prepare = self._search_prepare
+                            ready = prepare([job]) if prepare else [job]
+                            for candidate in ready:
+                                emit(candidate)
+                                self._search_emitted.add(candidate.url)
+                                streamed += 1
                 except WebDriverException:
                     continue
 

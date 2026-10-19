@@ -18,6 +18,7 @@ from requests.exceptions import ConnectionError, SSLError, Timeout
 from ..config import ScraperConfig
 from ..pipeline.processor import ProcessedLead
 from ..pipeline.deduplicator import RunDeduplicator
+from ..pipeline.recency_filter import RecencyFilter
 from ..models import JobLead
 from ..storage.sqlite_repository import SQLiteLeadRepository
 from ..timezones import resolve_timezone
@@ -90,6 +91,8 @@ class SheetsBatchWriter:
     def _add(self, item: ProcessedLead, dedup_key: str) -> None:
         if not self.enabled:
             return
+        if not self._fresh_for_upload(item, dedup_key):
+            return
         platform_label = self._platform_label(item)
         minimum_score = getattr(
             self.config, "sheets_min_lead_score", 0
@@ -111,6 +114,17 @@ class SheetsBatchWriter:
             and self._monotonic() >= self._retry_not_before[sheet_name]
         ):
             self._flush_sheet(sheet_name, self.batch_size)
+
+    def _fresh_for_upload(self, item: ProcessedLead, dedup_key: str) -> bool:
+        recent_minutes = getattr(self.config, "recent_minutes", None)
+        if recent_minutes is None or RecencyFilter(
+            recent_minutes / 60, keep_unknown=False,
+            strict_date_only=True, anchor_to_scraped_at=True,
+        ).matches(item.lead):
+            return True
+        logger.info("Skipping expired/unknown-date lead: %s", item.lead.title)
+        self.repository.expire_pending_uploads([dedup_key])
+        return False
 
     def flush_platform(self, platform_label: str) -> None:
         with self._lock:
@@ -342,21 +356,25 @@ class SheetsBatchWriter:
         else:
             # The canonical header is already present; avoid a redundant write.
             pass
-        values = worksheet.get_all_values()
+        if current != expected:
+            values = worksheet.get_all_values()
 
-        try:
-            self._apply_fixed_layout(worksheet)
-            self._write(
-                f"enable filter {name}",
-                worksheet.set_basic_filter,
-            )
-        except Exception as exc:
-            # Widths, colors and filters are cosmetic. Headers/schema above
-            # must succeed, but a styling failure must not reject lead data.
-            logger.warning(
-                "Worksheet layout failed for %s (%s); continuing lead upload "
-                "without completing formatting.", name, type(exc).__name__,
-            )
+        # Existing canonical tabs have already been initialized. In recent
+        # mode, keep cosmetic writes off the first lead's upload path.
+        if current != expected or getattr(self.config, "recent_minutes", None) is None:
+            try:
+                self._apply_fixed_layout(worksheet)
+                self._write(
+                    f"enable filter {name}",
+                    worksheet.set_basic_filter,
+                )
+            except Exception as exc:
+                # Headers/schema above must succeed; cosmetic failures must
+                # not reject lead data.
+                logger.warning(
+                    "Worksheet layout failed for %s (%s); continuing lead upload "
+                    "without completing formatting.", name, type(exc).__name__,
+                )
 
         headers = [value.casefold().strip() for value in values[0]]
         title_index = headers.index("job title") if "job title" in headers else 0
@@ -491,6 +509,12 @@ class SheetsBatchWriter:
             )
             self._sleep(cooldown_remaining)
 
+        # A queued/retried lead can expire while Sheets is unavailable.
+        if getattr(self.config, "recent_minutes", None) is not None:
+            buffer[:] = [entry for entry in buffer
+                         if self._fresh_for_upload(entry.item, entry.dedup_key)]
+        if not buffer:
+            return
         count = min(limit or len(buffer), len(buffer))
         batch = buffer[:count]
 
@@ -572,6 +596,7 @@ class SheetsBatchWriter:
             rows,
             start_row_index=1,
         )
+        requests.extend(self._row_format_requests(state.worksheet, start_row, new_entries))
         self._write(
             f"prepend {len(rows)} rows to {tab_name}",
             lambda: state.worksheet.spreadsheet.batch_update(
@@ -583,7 +608,6 @@ class SheetsBatchWriter:
             RunDeduplicator.key(entry.item.lead)
             for entry in new_entries
         )
-        self._format_rows(state.worksheet, start_row, new_entries)
         return _AppendResult(new_entries, duplicates)
 
     def _record_primary_result(
@@ -643,12 +667,12 @@ class SheetsBatchWriter:
         date_label = found_at.astimezone(local_timezone).strftime("%d-%m-%Y")
         return f"Leads {date_label}"
 
-    def _format_rows(
-        self,
+    @staticmethod
+    def _row_format_requests(
         worksheet: object,
         start_row: int,
         entries: list[_BufferedLead],
-    ) -> None:
+    ) -> list[dict]:
         requests = []
         for offset, entry in enumerate(entries):
             analysis = entry.item.analysis
@@ -680,6 +704,10 @@ class SheetsBatchWriter:
                     }
                 }
             )
+        return requests
+
+    def _format_rows(self, worksheet, start_row, entries) -> None:
+        requests = self._row_format_requests(worksheet, start_row, entries)
         if requests:
             try:
                 self._write(

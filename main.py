@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import faulthandler
 import logging
 import sys
 import time
@@ -43,7 +44,7 @@ platforms:
   all             = All platforms (default)
 
 examples:
-  python main.py                                         # 10 runs, 30s apart
+  python main.py                                         # 10 runs, 5s apart
   python main.py --runs 1                                # one run only
   python main.py --continuous                            # until Ctrl+C
   python main.py -p upwork freelancer                   # Upwork + Freelancer only
@@ -108,9 +109,13 @@ examples:
     p.add_argument(
         "--interval",
         type=float,
-        default=30.0,
+        default=5.0,
         metavar="SECONDS",
-        help="Wait between completed runs (default: 30)",
+        help="Wait between completed runs (default: 5)",
+    )
+    p.add_argument(
+        "--recent-minutes", type=float, default=10,
+        help="Only collect leads posted within this many minutes (default: 10; 0 restores daily catch-up policy)",
     )
     p.add_argument(
         "-v", "--verbose",
@@ -122,6 +127,8 @@ examples:
         p.error("--runs must be at least 1")
     if args.interval < 0:
         p.error("--interval cannot be negative")
+    if not 0 <= args.recent_minutes <= 1440:
+        p.error("--recent-minutes must be between 0 and 1440")
     return args
 
 
@@ -131,6 +138,13 @@ def build_config(
     force_catch_up: bool = False,
 ) -> ScraperConfig:
     config = ScraperConfig()
+    if args.recent_minutes:
+        config.recent_minutes = args.recent_minutes
+        config.sheets_batch_size = 1
+        config.max_platform_workers = 5
+        config.http_keyword_workers = min(6, len(args.keywords or config.keywords))
+        if args.recent_minutes <= 120:
+            config.selenium_max_scrolls = 0
     if args.keywords:
         config.keywords = args.keywords
     if args.platforms:
@@ -145,6 +159,7 @@ def build_config(
     if args.no_adaptive_daily:
         config.adaptive_daily_limits = False
     if force_catch_up:
+        config.recent_minutes = None
         config.force_catch_up = True
         config.adaptive_daily_limits = True
     return config
@@ -224,4 +239,5 @@ def main():
 
 
 if __name__ == "__main__":
+    faulthandler.enable()
     main()

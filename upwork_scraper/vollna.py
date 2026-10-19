@@ -4,23 +4,27 @@ skills, budgets, and direct Upwork URLs for LeadAnalyzer to extract
 company names, emails, decision-makers, and other business intelligence.
 """
 
+import os
 import re
 import time
 import random
 import logging
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs, unquote
 from typing import Optional
 
-from curl_cffi import requests as cffi_requests
-
 from .config import ScraperConfig
+from .http_transport import create_scraper_session
 from .models import JobLead
 from .pipeline.location_filter import LocationFilter
 
 logger = logging.getLogger(__name__)
 
-VOLLNA_RSS_URL = "https://www.vollna.com/rss/XswrDNEvze23uFN217i2"
+VOLLNA_RSS_URL = (
+    os.getenv("VOLLNA_RSS_URL")
+    or "https://www.vollna.com/rss/XswrDNEvze23uFN217i2"
+)
 
 
 class VollnaScraper:
@@ -28,11 +32,12 @@ class VollnaScraper:
 
     def __init__(self, config: ScraperConfig | None = None):
         self.config = config or ScraperConfig()
-        self.session = cffi_requests.Session(
+        self.session = create_scraper_session(
             impersonate=self.config.impersonate_browser
         )
         self._seen_titles: set[str] = set()
         self._location_resolver = None
+        self._owns_location_resolver = True
         self._location_filter = LocationFilter(
             self.config.target_locations
         )
@@ -53,6 +58,8 @@ class VollnaScraper:
     def search_keywords(
         self,
         keywords: list[str],
+        *,
+        on_lead=None,
     ) -> dict[str, list[JobLead]]:
         """Fetch RSS once, then filter the same payload for every keyword."""
         logger.info(
@@ -64,10 +71,22 @@ class VollnaScraper:
         if not xml_data:
             return {keyword: [] for keyword in keywords}
         results = {
-            keyword: self._parse_jobs(xml_data, keyword)[
-                :self.config.max_results_per_keyword
-            ]
+            keyword: self._parse_jobs(xml_data, keyword)
             for keyword in keywords
+        }
+        from .pipeline.recency_filter import RecencyFilter
+        recency = RecencyFilter(
+            self.config.collection_recency_hours, keep_unknown=False,
+            strict_date_only=True, anchor_to_scraped_at=True,
+        )
+        results = {
+            keyword: sorted(
+                [lead for lead in leads if recency.matches(lead)],
+                key=lambda lead: recency.parse_posted_at(lead.posted_date)
+                or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )[:self.config.max_results_per_keyword]
+            for keyword, leads in results.items()
         }
         unique_leads = {
             lead.url: lead
@@ -75,7 +94,21 @@ class VollnaScraper:
             for lead in leads
             if lead.url
         }
-        self._enrich_locations(list(unique_leads.values()))
+        if on_lead is None:
+            self._enrich_locations(list(unique_leads.values()))
+        else:
+            # Release ready jobs before any browser waits; publish unresolved
+            # jobs individually as soon as their required country is known.
+            pending = []
+            for lead in unique_leads.values():
+                if self.config.target_locations and not (lead.country or lead.location):
+                    pending.append(lead)
+                elif self._target_leads([lead]):
+                    on_lead(lead.keyword_searched, lead)
+            for lead in pending:
+                self._enrich_locations([lead])
+                if self._target_leads([lead]):
+                    on_lead(lead.keyword_searched, lead)
         return {
             keyword: self._target_leads(leads)
             for keyword, leads in results.items()
@@ -228,7 +261,7 @@ class VollnaScraper:
         )
 
     def close(self):
-        if self._location_resolver is not None:
+        if self._location_resolver is not None and self._owns_location_resolver:
             self._location_resolver.close()
             self._location_resolver = None
         self.session.close()

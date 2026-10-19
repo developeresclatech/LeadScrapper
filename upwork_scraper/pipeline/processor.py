@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 from ..analyzer import LeadAnalysis, LeadAnalyzer
 from ..models import JobLead
 from .deduplicator import RunDeduplicator
 from .recency_filter import RecencyFilter
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -29,8 +32,10 @@ class LeadProcessor:
 
     def process(self, lead: JobLead) -> ProcessedLead | None:
         if not self._recency_filter.matches(lead):
+            logger.debug("Rejected by recency: %s (posted %s)", lead.title, lead.posted_date)
             return None
         if not self._deduplicator.accept(lead):
+            logger.debug("Rejected duplicate: %s", lead.title)
             return None
 
         analysis = self._analyzer.analyze(

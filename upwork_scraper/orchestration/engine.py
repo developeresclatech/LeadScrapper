@@ -221,7 +221,7 @@ class LeadEngine:
         recency = RecencyFilter(
             min(24.0, self.run_policy.recency_hours)
             if self.run_policy.recency_hours is not None else 24.0,
-            keep_unknown=False, strict_date_only=True,
+            keep_unknown=False, strict_date_only=True, anchor_to_scraped_at=True,
         )
         return [lead for lead in leads
                 if recency.matches(lead) and self._detail_deduplicator.accept(lead)]
@@ -243,6 +243,7 @@ class LeadEngine:
                     if self.run_policy.recency_hours is not None else 24.0,
                     keep_unknown=False,
                     strict_date_only=True,
+                    anchor_to_scraped_at=True,
                 ),
             )
             self._processor_local.processor = processor

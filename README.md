@@ -46,11 +46,17 @@ LeadEngine/main thread: supervise events, print progress, export final CSV/JSON
 
 Platforms run concurrently with a bounded worker pool. Upwork Selenium uses
 two keyword workers with isolated Chrome/ChromeDriver sessions. Freelancer
-and Guru use three keyword workers with separate scraper sessions. The global
+and Guru use up to six keyword workers each in CLI recent mode (three with
+the older daily policy), with separate scraper sessions. The global
 browser semaphore still permits at most two simultaneous browsers. Vollna
 fetches its RSS feed once per run, filters every keyword locally, and uses an
 authenticated Upwork detail resolver only for linked jobs whose country is
 missing. Resolved countries are cached by Upwork job ID across both sources.
+Vollna publishes jobs with known target countries before resolving missing
+countries, then publishes each resolved job immediately. RSS freshness filtering
+and newest-first sorting happen before the per-keyword result limit. In recent
+mode, failed Upwork logins observe their cooldown without waiting five minutes
+again for every keyword; successful manual login is detected on the next check.
 
 Upwork searches are prefiltered at the source with separate client-location
 queries for `United States` and `Canada`. The per-keyword result allowance is
@@ -60,9 +66,13 @@ Upwork is restricted by its search query; Freelancer and Guru filter their
 platform country metadata before returning; Vollna resolves its linked
 Upwork client country and filters before analysis.
 
-The platform scraper implementations retain their original selectors,
-requests, parsing, login, and fallback behavior. The adapter layer only gives
-them a common `scrape(keyword)` interface.
+On Windows all scraper HTTP clients use standard `requests` to avoid
+intermittent native curl process termination. Other hosts retain curl fingerprint
+support for Guru, Vollna, and direct Upwork. Each keyword worker
+owns its search session; detail requests run independently in a bounded pool.
+The adapter layer gives platform scrapers a common `scrape(keyword)` interface.
+Direct Upwork HTTP blocks (403/429) are logged and stop further direct requests
+for that run; the authenticated Selenium platform continues independently.
 
 ## Processing lifecycle
 
@@ -125,6 +135,26 @@ upwork_scraper/
 ```
 
 ## Installation
+
+CLI runs default to a 10-minute freshness window, one search page per keyword,
+six keywords (web development, mobile app development, marketing, SEO,
+Shopify, and WordPress), a five-second pause between completed runs,
+and immediate Sheets uploads (one lead per batch). Windows over two hours use
+up to 150 jobs and three pages per keyword; `--results` overrides the job cap.
+Use `--recent-minutes 10`
+for a ten-minute window or `--recent-minutes 0` for the older daily catch-up
+policy. `--catch-up` explicitly enables the 14-hour window for the first run.
+Recent mode skips attachment detail visits, leaving their status `Not checked`.
+Upwork streams parsed cards before the remaining country searches finish;
+Freelancer streams each completed metadata result and Guru streams each page.
+Short-window CLI runs skip extra scrolling to start processing visible cards sooner.
+Expired pending uploads are retired while their local lead records are retained.
+Vollna and direct Upwork country checks reuse the session's two Upwork browsers
+when the Selenium platform is enabled.
+Occupied Windows Chrome profiles are checked before launch. Failed browser
+constructors clean up their owned processes and pause that worker's launches
+for five minutes. Stop duplicate scraper runs and close leftover scraper Chrome
+windows before restarting; normal browsing profiles are not closed automatically.
 
 Python 3.10 or newer is recommended.
 

@@ -1,6 +1,7 @@
 """Convert processed leads to the stable export row schema."""
 
 from datetime import datetime, timezone, tzinfo
+from email.utils import parsedate_to_datetime
 
 from ..pipeline.processor import ProcessedLead
 
@@ -36,20 +37,34 @@ def processed_lead_to_row(
     if found_at is not None and saved_at is not None:
         duration = f"{max(0.0, (saved_at - found_at).total_seconds()):.2f}"
 
+    posted_display = lead.posted_date
+    if lead.platform == "Upwork (Vollna)":
+        try:
+            posted_at = parsedate_to_datetime(lead.posted_date)
+            if posted_at.tzinfo is None:
+                posted_at = posted_at.replace(tzinfo=timezone.utc)
+            reference = saved_at or datetime.now(timezone.utc)
+            age_seconds = max(0, int((reference - posted_at).total_seconds()))
+            amount, unit = ((age_seconds, "second") if age_seconds < 60
+                            else (age_seconds // 60, "minute"))
+            posted_display = f"{amount} {unit}{'' if amount == 1 else 's'} ago"
+        except (TypeError, ValueError, OverflowError):
+            pass
+
     def display_timestamp(value: datetime | None, fallback: str = "") -> str:
         if value is None:
             return fallback
         if display_timezone is None:
             return value.isoformat(timespec="seconds")
         local_value = value.astimezone(display_timezone)
-        local_time = local_value.strftime("%I:%M %p").lstrip("0")
+        local_time = local_value.strftime("%I:%M:%S %p").lstrip("0")
         return f"{local_value:%Y-%m-%d} {local_time}"
 
     return {
         "Job Title": lead.title,
         "Job URL": lead.url,
         "Job Platform": lead.platform,
-        "Date Posted": lead.posted_date,
+        "Date Posted": posted_display,
         "Lead Found At": display_timestamp(found_at, lead.scraped_at),
         "Sheet Saved At": display_timestamp(saved_at),
         "Found-to-Sheet Seconds": duration,

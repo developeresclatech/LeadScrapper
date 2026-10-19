@@ -16,11 +16,11 @@ class SessionRunnerTests(unittest.TestCase):
         engine.return_value.close.assert_called_once()
         session.return_value.close.assert_called_once()
 
-    def test_session_defaults_to_ten_runs_and_thirty_seconds(self) -> None:
+    def test_session_defaults_to_ten_runs_and_five_seconds(self) -> None:
         args = main.parse_args([])
 
         self.assertEqual(args.runs, 10)
-        self.assertEqual(args.interval, 30.0)
+        self.assertEqual(args.interval, 5.0)
         self.assertFalse(args.continuous)
 
     def test_forced_catch_up_applies_only_to_first_session_run(self) -> None:
